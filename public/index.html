@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NOPLP — Révision</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<!-- NAV -->
+<nav class="nav">
+  <div class="nav-brand">
+    <span class="brand-accent">N</span>OPLP
+    <span class="brand-sub">révision</span>
+  </div>
+  <div class="nav-links">
+    <button class="nav-btn active" data-view="home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      Accueil
+    </button>
+    <button class="nav-btn" data-view="library">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+      Bibliothèque
+    </button>
+    <button class="nav-btn" data-view="profile">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      Profil
+    </button>
+    <button class="nav-btn" data-view="emission">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
+      Émission
+    </button>
+  </div>
+  <div class="nav-user">
+    <span id="nav-username" class="nav-username"></span>
+    <button id="btn-logout" class="btn-logout">Déconnexion</button>
+  </div>
+</nav>
+
+<!-- ── VIEW: HOME ──────────────────────────────────────── -->
+<section id="view-home" class="view active">
+  <div class="home-hero">
+    <div>
+      <div class="home-greeting">Bonjour, <span id="home-username"></span></div>
+    </div>
+    <div class="home-date" id="home-date"></div>
+  </div>
+
+  <div class="home-actions">
+    <div class="home-action-card" id="home-btn-quick">
+      <div class="home-action-icon">🎯</div>
+      <div class="home-action-title">Révision rapide</div>
+      <div class="home-action-sub">Chanson aléatoire de votre playlist</div>
+    </div>
+    <div class="home-action-card" id="home-btn-emission">
+      <div class="home-action-icon">📺</div>
+      <div class="home-action-title">Mode Émission</div>
+      <div class="home-action-sub">Simulez l'émission</div>
+    </div>
+    <div class="home-action-card" id="home-btn-library">
+      <div class="home-action-icon">⊞</div>
+      <div class="home-action-title">Bibliothèque</div>
+      <div class="home-action-sub">Cherchez une chanson</div>
+    </div>
+  </div>
+
+  <div class="home-sections">
+    <div class="home-section">
+      <div class="home-section-title">Reprendre</div>
+      <div id="home-recents"></div>
+    </div>
+    <div class="home-section">
+      <div class="home-section-title">Playlist</div>
+      <div id="home-playlist"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── VIEW: LIBRARY ───────────────────────────────────── -->
+<section id="view-library" class="view">
+  <div class="library-header">
+    <div class="playlist-panel" id="playlist-panel">
+      <div id="playlist-chips-lib" class="playlist-chips-lib"></div>
+      <button id="btn-new-playlist" class="btn-new-playlist" title="Nouvelle playlist">+</button>
+    </div>
+    <div class="search-row">
+      <div class="search-box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input id="search-input" type="text" placeholder="Titre, artiste…" autocomplete="off">
+      </div>
+      <select id="type-filter">
+        <option value="">Tous</option>
+        <option value="mc">Même Chanson</option>
+        <option value="fn">Finale</option>
+        <option value="none">Aucun</option>
+      </select>
+      <select id="mastery-filter">
+        <option value="">Tous</option>
+        <option value="maitrisee">Apprises</option>
+        <option value="revision">A revoir</option>
+        <option value="prevue">En cours</option>
+        <option value="non_maitrisee">Aucun</option>
+      </select>
+      <select id="sort-filter">
+        <option value="">A a Z</option>
+        <option value="z_a">Z a A</option>
+        <option value="word_count_asc">Nombre de mots asc</option>
+        <option value="word_count_desc">Nombre de mots desc</option>
+        <option value="mc_count_desc">Apparitions MC</option>
+        <option value="fn_count_desc">Apparitions Finale</option>
+        <option value="show_count_desc">Apparitions totales</option>
+        <option value="year_asc">Annee de sortie</option>
+        <option value="mal_aimees">Mal aimees</option>
+      </select>
+      <span id="song-count" class="song-count"></span>
+      <button id="btn-bulk-mode" class="btn-bulk-mode">Sélection</button>
+    </div>
+  </div>
+  <!-- Bulk tagging bar — hidden until selection mode is active -->
+  <div id="bulk-bar" class="bulk-bar hidden">
+    <span id="bulk-count" class="bulk-count">Cliquez sur des chansons pour les sélectionner</span>
+    <div class="bulk-actions">
+      <button class="bulk-apply-btn maitrisee" data-mastery="maitrisee" disabled>✓ Apprise</button>
+      <button class="bulk-apply-btn revision"  data-mastery="revision"  disabled>↺ À revoir</button>
+      <button class="bulk-apply-btn prevue"    data-mastery="prevue"    disabled>◎ En cours</button>
+      <button class="bulk-apply-btn"           data-mastery=""          disabled>✕ Aucun</button>
+    </div>
+  </div>
+  <div id="song-grid" class="song-grid"></div>
+  <div class="pagination">
+    <button id="prev-page" disabled>← Préc.</button>
+    <span id="page-info"></span>
+    <button id="next-page">Suiv. →</button>
+  </div>
+</section>
+
+<!-- ── VIEW: PROFILE ───────────────────────────────────── -->
+<section id="view-profile" class="view">
+
+  <!-- Identity header -->
+  <div class="profile-header">
+    <div class="profile-avatar-wrap">
+      <div class="profile-avatar" id="profile-avatar"></div>
+      <label class="profile-avatar-btn" title="Changer l'avatar">
+        <input type="file" id="avatar-input" accept="image/jpeg,image/png,image/webp,image/gif" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      </label>
+    </div>
+    <div class="profile-identity">
+      <div class="profile-username-row">
+        <span id="profile-username" class="profile-username"></span>
+        <button id="btn-edit-username" class="profile-edit-btn" title="Modifier le nom">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </button>
+      </div>
+      <div class="profile-bio-row">
+        <span id="profile-bio" class="profile-bio"></span>
+        <button id="btn-edit-bio" class="profile-edit-btn" title="Modifier la bio">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Key numbers -->
+  <div class="profile-stats" id="profile-stats"></div>
+
+  <!-- Activity + streak -->
+  <div class="profile-section">
+    <div class="profile-section-header">
+      <span class="profile-section-title">Activité</span>
+      <span id="profile-streak" class="streak-badge"></span>
+    </div>
+    <div id="profile-activity"></div>
+  </div>
+
+  <!-- Mastery bar -->
+  <div class="profile-section">
+    <div class="profile-section-title">Maîtrise</div>
+    <div id="profile-mastery-row"></div>
+  </div>
+
+  <!-- Top artists + top songs -->
+  <div class="profile-tops">
+    <div class="profile-section">
+      <div class="profile-section-title">Artistes préférés</div>
+      <div id="profile-top-artists"></div>
+    </div>
+    <div class="profile-section">
+      <div class="profile-section-title">Chansons préférées</div>
+      <div id="profile-top-songs"></div>
+    </div>
+  </div>
+
+</section>
+
+<!-- ── VIEW: EMISSION ──────────────────────────────── -->
+<section id="view-emission" class="view">
+  <div id="emission-container"></div>
+</section>
+
+<!-- ── MODAL: EMISSION SONG PICK ──────────────────── -->
+<div id="emission-pick-modal" class="modal hidden">
+  <div class="modal-overlay" id="emission-pick-overlay"></div>
+  <div class="modal-panel emission-pick-panel">
+    <button class="btn-close" id="btn-close-emission-pick">✕</button>
+    <div id="emission-pick-level" class="emission-pick-level"></div>
+    <p class="emission-pick-hint">Choisissez la chanson à jouer :</p>
+    <div id="emission-pick-songs" class="emission-pick-songs"></div>
+  </div>
+</div>
+
+<!-- ── MODAL: EPISODE PICKER ──────────────────── -->
+<div id="episode-picker-modal" class="modal hidden">
+  <div class="modal-overlay" id="episode-picker-overlay"></div>
+  <div class="modal-panel episode-picker-panel">
+    <button class="btn-close" id="btn-close-episode-picker">✕</button>
+    <div class="episode-picker-title">Choisir un épisode</div>
+    <div class="episode-cal-nav">
+      <button id="cal-prev" class="cal-nav-btn" title="Mois précédent">‹</button>
+      <span id="cal-month-label" class="cal-month-label"></span>
+      <button id="cal-next" class="cal-nav-btn" title="Mois suivant">›</button>
+    </div>
+    <div id="episode-calendar" class="episode-calendar"></div>
+    <div id="episode-emission-choice" class="episode-emission-choice hidden"></div>
+  </div>
+</div>
+
+<!-- Mastery picker popover -->
+<div id="mastery-picker" class="mastery-picker hidden">
+  <button class="mastery-pick-btn" data-mastery="maitrisee">Apprise</button>
+  <button class="mastery-pick-btn" data-mastery="revision">A revoir</button>
+  <button class="mastery-pick-btn" data-mastery="prevue">En cours</button>
+</div>
+
+<!-- ── MODAL: MODE SELECTION ──────────────────────────── -->
+<div id="mode-modal" class="modal hidden">
+  <div class="modal-overlay" id="mode-overlay"></div>
+  <div class="modal-panel mode-panel">
+    <button class="btn-close mode-close" id="btn-close-mode">✕</button>
+    <div class="mode-song-info">
+      <div id="mode-title" class="mode-song-title"></div>
+      <div id="mode-artist" class="mode-song-artist"></div>
+    </div>
+    <h3 class="mode-heading">Choisir un mode</h3>
+
+    <!-- Video source toggle — shown only when karaoke_url exists -->
+    <div id="mode-video-toggle" class="mode-video-toggle hidden">
+      <button class="video-src-btn active" data-src="classic">Clip officiel</button>
+      <button class="video-src-btn" data-src="karaoke">Karaoké</button>
+    </div>
+
+    <div class="mode-section">
+      <div class="mode-section-label">Mode Normal</div>
+      <div id="mode-normal-btns" class="mode-btns"></div>
+    </div>
+
+    <div id="mode-mc-section" class="mode-section hidden">
+      <div class="mode-section-label">Même chanson (MC)</div>
+      <div id="mode-mc-btns" class="mode-btns"></div>
+    </div>
+
+    <div id="mode-finale-section" class="mode-section hidden">
+      <div class="mode-section-label">Finale (1 000 → 20 000 €)</div>
+      <div id="mode-finale-btns" class="mode-btns"></div>
+    </div>
+
+    <div class="mode-section">
+      <div class="mode-section-label">Révision libre</div>
+      <button class="mode-btn" data-mode="revision">Écouter sans blanks</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── MODAL: GAME ─────────────────────────────────────── -->
+<div id="game-modal" class="modal hidden">
+  <div class="modal-overlay" id="modal-overlay"></div>
+  <div class="modal-panel">
+
+    <div class="game-header">
+      <div class="game-meta">
+        <span id="gm-title" class="gm-title"></span>
+        <span id="gm-artist" class="gm-artist"></span>
+        <span id="gm-mode-badge" class="gm-mode-badge"></span>
+      </div>
+      <div class="game-controls">
+        <button id="btn-karaoke" class="btn-ghost hidden" title="Basculer entre le clip officiel et la version karaoké">
+          Karaoké
+        </button>
+        <button id="btn-audio-only" class="btn-ghost" title="Masquer la vidéo (audio uniquement)">
+          Audio
+        </button>
+        <button id="btn-calibrate" class="btn-ghost" title="Mode calibration (ajouter timestamps)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+          Calibrer
+        </button>
+        <button id="btn-next-song" class="btn-ghost hidden">Chanson suivante →</button>
+        <button id="btn-close-game" class="btn-close">✕</button>
+      </div>
+    </div>
+
+    <!-- YouTube iframe -->
+    <div class="yt-container">
+      <div id="yt-player"></div>
+    </div>
+
+    <!-- Score bar -->
+    <div class="score-bar">
+      <span>Score : <strong id="score-display">0</strong></span>
+      <span id="blanks-left"></span>
+      <button id="btn-initiales" class="btn-ghost-sm hidden" title="Révèle l'initiale de chaque mot (bonus unique)">Initiales</button>
+      <button id="btn-reveal-all" class="btn-ghost-sm">Tout révéler</button>
+    </div>
+
+    <!-- Lyrics panel -->
+    <div class="lyrics-panel" id="lyrics-panel"></div>
+
+    <!-- Revision mode navigation (replaces typing area) -->
+    <div id="revision-nav" class="revision-nav hidden">
+      <button id="btn-prev-line" class="btn-rev-nav">← Précédent</button>
+      <span id="revision-position" class="revision-position"></span>
+      <button id="btn-next-revision" class="btn-rev-nav">Suivant →</button>
+    </div>
+
+    <!-- Typing input area -->
+    <div class="typing-area" id="typing-area">
+      <div class="typing-prompt" id="typing-prompt">Tapez la phrase manquante :</div>
+      <div class="typing-row">
+        <input type="text" id="typing-input" class="typing-input" placeholder="Votre réponse…" autocomplete="off" autocorrect="off">
+        <button id="btn-next-line" class="btn-next-line" title="Ligne suivante">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+        <button id="btn-abandon" class="btn-abandon hidden" title="Abandonner ce blank">✕ Abandonner</button>
+      </div>
+      <div id="typing-feedback" class="typing-feedback"></div>
+    </div>
+
+    <!-- Calibration overlay (hidden by default) -->
+    <div id="calib-overlay" class="calib-overlay hidden">
+      <div class="calib-hint">
+        <strong>Mode calibration</strong> — Cliquez sur chaque ligne au moment où elle commence à être chantée.
+        <button id="btn-calib-save" class="btn-primary btn-sm">Sauvegarder</button>
+        <button id="btn-calib-cancel" class="btn-ghost btn-sm">Annuler</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── AUTH OVERLAY ─────────────────────────────────────────────── -->
+<div id="auth-overlay" class="auth-overlay hidden">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <span class="brand-accent">N</span>OPLP
+      <span class="brand-sub">révision</span>
+    </div>
+    <h2 id="auth-title" class="auth-heading">Connexion</h2>
+    <form id="auth-form" class="auth-form" autocomplete="on">
+      <label class="auth-label">
+        Nom d'utilisateur
+        <input id="auth-username" type="text" class="auth-input" autocomplete="username" required>
+      </label>
+      <label class="auth-label">
+        Mot de passe
+        <input id="auth-password" type="password" class="auth-input" autocomplete="current-password" required>
+      </label>
+      <p id="auth-error" class="auth-error"></p>
+      <button id="auth-submit" type="submit" class="auth-btn">Se connecter</button>
+    </form>
+    <button id="auth-toggle" class="auth-toggle">Pas de compte ? S'inscrire</button>
+  </div>
+</div>
+
+<!-- ── MODAL: RÉVISION RAPIDE ──────────────────────────── -->
+<div id="revision-modal" class="modal hidden">
+  <div class="modal-overlay" id="revision-overlay"></div>
+  <div class="modal-panel revision-modal-panel">
+    <h2 class="revision-modal-title">Révision rapide</h2>
+    <div class="revision-modes" id="revision-modes">
+      <button class="rev-mode-btn" data-mode="maitrisee">✓ Apprises</button>
+      <button class="rev-mode-btn" data-mode="revision">↺ À revoir</button>
+      <button class="rev-mode-btn" data-mode="prevue">◎ En cours</button>
+      <button class="rev-mode-btn" data-mode="random">🎲 Surprends moi</button>
+      <button class="rev-mode-btn" data-mode="mc">🎲 Surprends moi (MC)</button>
+    </div>
+    <div class="revision-count-row">
+      <label for="rev-count">Nombre de chansons</label>
+      <div class="rev-count-controls">
+        <button class="rev-count-btn" id="rev-count-minus">−</button>
+        <span id="rev-count-display">5</span>
+        <button class="rev-count-btn" id="rev-count-plus">+</button>
+      </div>
+    </div>
+    <div class="revision-modal-actions">
+      <button id="btn-start-revision" class="btn-primary" disabled>Commencer</button>
+      <button id="btn-close-revision" class="btn-ghost">Annuler</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

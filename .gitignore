@@ -1,0 +1,10 @@
+node_modules/
+.env
+src/data/songs.db
+src/data/songs.db.bak
+src/data/*.sqbpro
+server.log
+public/avatars/*.png
+public/avatars/*.jpg
+public/avatars/*.webp
+.claude/
