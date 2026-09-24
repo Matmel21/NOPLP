@@ -1,6 +1,7 @@
 // ═══ PROFILE — identity, activity, stats ══════════════════════════
 import { api }         from './api.js';
-import { esc, showToast } from './utils.js';
+import { esc, showToast, promptDialog } from './utils.js';
+import { getCurrentUser } from './auth.js';
 
 let _user = null;
 
@@ -20,6 +21,8 @@ export function initProfile(user) {
       try {
         const { avatar_url } = await api.post('/api/profile/avatar', { data, type });
         _user.avatar_url = avatar_url;
+        const authUser = getCurrentUser();
+        if (authUser) authUser.avatar_url = avatar_url;
         renderAvatar(_user);
         showToast('Avatar mis à jour');
       } catch { showToast('Erreur lors du téléchargement'); }
@@ -27,18 +30,19 @@ export function initProfile(user) {
     reader.readAsDataURL(file);
   });
 
-  document.getElementById('btn-edit-username').addEventListener('click', () => {
+  document.getElementById('btn-edit-username').addEventListener('click', async () => {
     const current = document.getElementById('profile-username').textContent;
-    const val = prompt('Nouveau nom :', current);
-    if (!val || val.trim() === current) return;
+    const val = await promptDialog({ title: 'Modifier le pseudo', value: current, maxLength: 64, confirmLabel: 'Enregistrer' });
+    if (!val || val === current) return;
     api.put('/api/profile', { username: val.trim() })
       .then(({ user }) => { _user = user; renderIdentity(user); showToast('Nom mis à jour'); })
       .catch(() => showToast('Ce nom est déjà pris'));
   });
 
-  document.getElementById('btn-edit-bio').addEventListener('click', () => {
+  document.getElementById('btn-edit-bio').addEventListener('click', async () => {
     const current = document.getElementById('profile-bio').textContent;
-    const val = prompt('Bio (200 caractères max) :', current === 'Ajouter une bio…' ? '' : current);
+    const val = await promptDialog({ title: 'Modifier la bio', placeholder: '200 caractères max',
+      value: current === 'Ajouter une bio…' ? '' : current, maxLength: 200, confirmLabel: 'Enregistrer', allowEmpty: true });
     if (val === null) return;
     api.put('/api/profile', { bio: val.trim() })
       .then(({ user }) => { _user = user; renderIdentity(user); showToast('Bio mise à jour'); })
@@ -57,10 +61,10 @@ export async function loadProfile() {
   renderAvatar(data.user);
   renderIdentity(data.user);
   renderStats(data);
-  renderActivity(actData.activity, actData.streak, actData.maxStreak, actData.totalActiveDays);
-  renderMasteryBar(data);
+  renderWeek(actData);
+  renderMasteryDonuts(data);
   renderTopArtists(data.topArtists);
-  renderTopSongs(data.topSongs);
+  renderFavoriteSongs(data.favSongs || []);
 }
 
 // ── Avatar ────────────────────────────────────────────────────────
@@ -76,7 +80,9 @@ function avatarColor(name) {
 function renderAvatar(user) {
   const el = document.getElementById('profile-avatar');
   if (user.avatar_url) {
-    el.innerHTML = `<img src="${user.avatar_url}?t=${Date.now()}" alt="avatar">`;
+    // The URL is versioned on upload, so an identical src means the same image
+    if (el.querySelector('img')?.getAttribute('src') === user.avatar_url) return;
+    el.innerHTML = `<img src="${esc(user.avatar_url)}" alt="">`;
     el.style.background = 'none';
   } else {
     const initials = (user.username || '?').slice(0, 2).toUpperCase();
@@ -110,137 +116,163 @@ function renderStats(data) {
     </div>`).join('');
 }
 
-// ── Activity heatmap (LeetCode style) ────────────────────────────
+// ── Weekly streak timeline (Duolingo style) ──────────────────────
 
-const MONTH_FR = ['Jan','Fév','Mar','Avr','Mai','Juin','Juil','Aoû','Sep','Oct','Nov','Déc'];
+const DAY_FR = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'];
 
-// Format a Date as YYYY-MM-DD in LOCAL time (avoids the UTC shift that
-// toISOString() introduces, which would misplace "today" in the grid).
-function localKey(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+function flameImg(cls = '') {
+  return `<img class="flame ${cls}" src="/img/flame.webp" alt="" draggable="false">`;
+}
+const MISS_ICON = '<svg class="miss-x" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>';
+const NODE_ICON = { lit: () => flameImg(), pending: () => flameImg('dim'), missed: () => MISS_ICON, future: () => '' };
+
+// 'YYYY-MM-DD' arithmetic at UTC noon so DST never shifts the day.
+function addDays(key, n) {
+  const d = new Date(key + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
 }
 
-function heatLevel(count) {
-  if (count === 0) return 0;
-  if (count <= 2)  return 1;
-  if (count <= 5)  return 2;
-  return 3;
+function dayTooltip(info) {
+  const parts = [];
+  if (info.plays)   parts.push(`${info.plays} chanson${info.plays > 1 ? 's' : ''} jouée${info.plays > 1 ? 's' : ''}`);
+  if (info.learned) parts.push(`${info.learned} apprise${info.learned > 1 ? 's' : ''}`);
+  return parts.join(' · ');
 }
 
-function renderActivity(activity, streak, maxStreak = 0, totalActiveDays = 0) {
-  const map = {};
-  for (const r of activity) map[r.date] = r.count;
+function renderWeek({ today, days, streak, maxStreak, totalActiveDays }) {
+  const byDate = Object.fromEntries(days.map(d => [d.date, d]));
+  const dow    = (new Date(today + 'T12:00:00Z').getUTCDay() + 6) % 7;   // Mon = 0
+  const monday = addDays(today, -dow);
 
-  // Build a 53-week grid aligned so today is in the rightmost week.
-  // Week starts on Monday (French standard).
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const todayKey = localKey(today);
-  const dayOfWeek = (today.getDay() + 6) % 7; // Mon=0 … Sun=6
+  const week = DAY_FR.map((label, i) => {
+    const date = addDays(monday, i);
+    return { label, date, info: byDate[date], isToday: date === today, future: date > today };
+  });
 
-  // Start from the Monday of the week that is 52 weeks ago
-  const start = new Date(today);
-  start.setDate(today.getDate() - dayOfWeek - 52 * 7);
-
-  // Build week columns
-  const weeks = [];
-  const monthLabels = []; // { weekIdx, label }
-  let d = new Date(start);
-  let prevMonth = -1;
-
-  for (let w = 0; w < 53; w++) {
-    const week = [];
-    for (let day = 0; day < 7; day++) {
-      const key = localKey(d);
-      const isFuture = d > today;
-      const count = isFuture ? -1 : (map[key] || 0);
-      const m = d.getMonth();
-      // Emit a month label when the month changes and it's the start of a column
-      if (day === 0 && m !== prevMonth) {
-        monthLabels.push({ weekIdx: w, label: MONTH_FR[m] });
-        prevMonth = m;
-      }
-      const title = isFuture ? '' : `${key} — ${count} session${count !== 1 ? 's' : ''}`;
-      week.push({ count, title, isToday: key === todayKey });
-      d.setDate(d.getDate() + 1);
-    }
-    weeks.push(week);
-  }
-
-  // Build month label row (CSS grid positioned by week index)
-  const monthRow = monthLabels.map(({ weekIdx, label }) =>
-    `<span class="hm-month" style="grid-column:${weekIdx + 1}">${label}</span>`
-  ).join('');
-
-  // Build day-of-week labels
-  const dayLabels = ['L','M','M','J','V','S','D'].map((l, i) =>
-    `<span class="hm-day-lbl${i % 2 === 0 ? '' : ' hm-day-lbl-hidden'}">${l}</span>`
-  ).join('');
-
-  // Build all cells as a flat CSS grid (7 rows, 53 columns, column-major)
-  const cells = weeks.flatMap((week, wi) =>
-    week.map((cell, di) => {
-      const lvl = cell.count < 0 ? 'future' : `l${heatLevel(cell.count)}`;
-      const todayCls = cell.isToday ? ' hm-today' : '';
-      return `<div class="hm-cell ${lvl}${todayCls}" title="${cell.title}"
-                   style="grid-column:${wi + 1};grid-row:${di + 1}"></div>`;
-    })
-  ).join('');
-
-  // Streak + stats line
-  const streakEl = document.getElementById('profile-streak');
-  streakEl.classList.remove('hidden');
-  streakEl.textContent = streak > 0
-    ? `🔥 ${streak} jour${streak > 1 ? 's' : ''} de suite`
-    : 'Aucun streak actif';
+  const track = week.map((d, i) => {
+    const state = d.info ? 'lit' : d.future ? 'future' : d.isToday ? 'pending' : 'missed';
+    const tip   = d.info ? dayTooltip(d.info) : (d.future ? '' : 'Aucune activité');
+    const link  = i < 6
+      ? `<div class="week-link${d.info && week[i + 1].info ? ' lit' : ''}"></div>`
+      : '';
+    return `
+      <div class="week-day ${state}${d.isToday ? ' today' : ''}" title="${tip}">
+        <div class="week-node">${NODE_ICON[state]()}</div>
+        <div class="week-label">${d.label}</div>
+        <div class="week-date">${Number(d.date.slice(8))}</div>
+      </div>${link}`;
+  }).join('');
 
   document.getElementById('profile-activity').innerHTML = `
-    <div class="heatmap-stats">
-      <span class="hm-stat"><strong>${totalActiveDays}</strong> jours actifs</span>
-      <span class="hm-stat-sep">·</span>
-      <span class="hm-stat">Meilleure série : <strong>${maxStreak}</strong> jour${maxStreak > 1 ? 's' : ''}</span>
-    </div>
-    <div class="heatmap-wrap">
-      <div class="hm-month-row" style="grid-template-columns:repeat(53,1fr)">${monthRow}</div>
-      <div class="hm-body">
-        <div class="hm-day-labels">${dayLabels}</div>
-        <div class="hm-grid">${cells}</div>
+    <div class="week-head">
+      <div class="week-streak${streak > 0 ? ' on' : ''}">
+        ${flameImg(streak > 0 ? 'big' : 'big dim')}
+        <div>
+          <div class="week-streak-num">${streak}</div>
+          <div class="week-streak-lbl">jour${streak > 1 ? 's' : ''} de suite</div>
+        </div>
+      </div>
+      <div class="week-meta">
+        <span><strong>${totalActiveDays}</strong> jour${totalActiveDays > 1 ? 's' : ''} actif${totalActiveDays > 1 ? 's' : ''}</span>
+        <span class="week-meta-sep">·</span>
+        <span>Meilleure série : <strong>${maxStreak}</strong></span>
       </div>
     </div>
-    <div class="hm-legend">
-      <span class="hm-legend-label">Moins</span>
-      <div class="hm-cell l0 hm-legend-cell"></div>
-      <div class="hm-cell l1 hm-legend-cell"></div>
-      <div class="hm-cell l2 hm-legend-cell"></div>
-      <div class="hm-cell l3 hm-legend-cell"></div>
-      <span class="hm-legend-label">Plus</span>
+    <div class="week-track">${track}</div>`;
+}
+
+// ── Mastery donuts ────────────────────────────────────────────────
+
+const DONUT_SEGS = [
+  { key: 'maitrisee',     from: '#3fbf7a', to: '#1e7d47', css: '--m-maitrisee', label: 'Apprises'     },
+  { key: 'prevue',        from: '#4a8fe0', to: '#1a4d8f', css: '--m-prevue',    label: 'En cours'     },
+  { key: 'revision',      from: '#f5ad55', to: '#c26a10', css: '--m-revision',  label: 'À revoir'     },
+  { key: 'non_maitrisee', from: '#e0605a', to: '#a0281e', css: '--m-non',       label: 'Non révisées' },
+];
+
+function polarToCartesian(cx, cy, r, angleDeg) {
+  const rad = (angleDeg - 90) * Math.PI / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function describeArc(cx, cy, r, startAngle, endAngle) {
+  const start = polarToCartesian(cx, cy, r, endAngle);
+  const end = polarToCartesian(cx, cy, r, startAngle);
+  const largeArcFlag = endAngle - startAngle <= 180 ? '0' : '1';
+  return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArcFlag} 0 ${end.x} ${end.y}`;
+}
+
+function buildDonutSvg(id, counts, total) {
+  const r = 36, cx = 50, cy = 50, sw = 14;
+  const defs = DONUT_SEGS.map(s => `
+    <linearGradient id="${id}-${s.key}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="${s.from}"/><stop offset="1" stop-color="${s.to}"/>
+    </linearGradient>`).join('');
+  let angle = 0;
+  const paths = DONUT_SEGS.map(seg => {
+    const val = counts[seg.key] || 0;
+    if (!val || !total) return '';
+    const share    = val / total;
+    const endAngle = Math.min(angle + share * 360, 359.999);
+    // Hover pushes each sector outward along its bisector (a full ring stays put)
+    const mid  = ((angle + endAngle) / 2 - 90) * Math.PI / 180;
+    const push = share < 0.999 ? 6 : 0;
+    const d = describeArc(cx, cy, r, angle, endAngle);
+    angle = endAngle;
+    return `<path class="donut-seg" d="${d}" fill="none" stroke="url(#${id}-${seg.key})" stroke-width="${sw}"
+              style="--dx:${(Math.cos(mid) * push).toFixed(2)}px;--dy:${(Math.sin(mid) * push).toFixed(2)}px"/>`;
+  }).join('');
+  const pct = total > 0 ? Math.round(((counts.maitrisee || 0) / total) * 100) : 0;
+  return {
+    svg: `<defs>${defs}</defs><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="${sw}"/>${paths}`,
+    pct,
+  };
+}
+
+function donutCard(id, title, counts, total) {
+  const { svg, pct } = buildDonutSvg(id, counts, total);
+  return `
+    <div class="donut-card" tabindex="0">
+      <div class="donut-title">${title}</div>
+      <div class="donut-stage">
+        <div class="donut-wrap">
+          <svg viewBox="0 0 100 100" class="donut-svg">${svg}</svg>
+          <div class="donut-center">${pct}<span class="donut-pct-sign">%</span></div>
+        </div>
+        <div class="donut-legend">
+          ${DONUT_SEGS.map(s => {
+            const v = counts[s.key] || 0;
+            return `
+            <div class="donut-leg-row">
+              <span class="donut-leg-dot" style="background:var(${s.css})"></span>
+              <span class="donut-leg-lbl">${s.label}</span>
+              <b class="donut-leg-val">${v}</b>
+              <span class="donut-leg-pct">${total ? Math.round(v / total * 100) : 0}%</span>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
     </div>`;
 }
 
-// ── Mastery bar ───────────────────────────────────────────────────
+function renderMasteryDonuts(data) {
+  const total = data.total_songs || 1;
+  const all = {
+    maitrisee:     data.maitrisee     || 0,
+    prevue:        data.prevue        || 0,
+    revision:      data.revision      || 0,
+    non_maitrisee: data.non_maitrisee || 0,
+  };
+  const bt = data.byType || {};
+  const tt = data.totals || {};
 
-function renderMasteryBar(data) {
-  const total = Math.max(data.total_songs || data.played || 1, 1);
-  const segments = [
-    { key: 'maitrisee',     cls: 'maitrisee',     label: 'Apprises'      },
-    { key: 'revision',      cls: 'revision',      label: 'À revoir'      },
-    { key: 'prevue',        cls: 'prevue',        label: 'En cours'      },
-    { key: 'non_maitrisee', cls: 'non_maitrisee', label: 'Non révisées'  },
-  ];
   document.getElementById('profile-mastery-row').innerHTML = `
-    <div class="mastery-bar">
-      ${segments.map(s => {
-        const pct = Math.round((data[s.key] || 0) / total * 100);
-        return pct > 0 ? `<div class="mastery-bar-seg ${s.cls}" style="width:${pct}%"></div>` : '';
-      }).join('')}
-    </div>
-    <div class="mastery-bar-labels">
-      ${segments.map(s =>
-        `<span class="mastery-tag ${s.cls}">${s.label} · ${data[s.key] || 0}</span>`
-      ).join('')}
+    <div class="donut-grid">
+      ${donutCard('dn-all', 'Tout', all, total)}
+      ${donutCard('dn-mc', 'Même chanson', bt.mc || {}, tt.mc || 0)}
+      ${donutCard('dn-fn', 'Finale', bt.fn || {}, tt.fn || 0)}
+      ${donutCard('dn-other', 'Autres', bt.other || {}, tt.other || 0)}
     </div>`;
 }
 
@@ -248,30 +280,109 @@ function renderMasteryBar(data) {
 
 function renderTopArtists(artists) {
   const el = document.getElementById('profile-top-artists');
-  if (!artists?.length) { el.innerHTML = `<p class="profile-empty">Aucune session enregistrée</p>`; return; }
-  const max = artists[0].plays;
+  if (!artists?.length) { el.innerHTML = `<p class="profile-empty">Aucune chanson révisée</p>`; return; }
+  const max = artists[0].tagged;
   el.innerHTML = artists.map((a, i) => `
     <div class="top-row">
       <span class="top-rank">${i + 1}</span>
       <div class="top-bar-wrap">
         <div class="top-bar-label">${esc(a.artist)}</div>
-        <div class="top-bar-track"><div class="top-bar-fill" style="width:${Math.round(a.plays/max*100)}%"></div></div>
+        <div class="top-bar-track"><div class="top-bar-fill" style="width:${Math.round(a.tagged/max*100)}%"></div></div>
       </div>
-      <span class="top-count">${a.plays}</span>
+      <span class="top-count">${a.tagged}</span>
     </div>`).join('');
 }
 
-function renderTopSongs(songs) {
+// ── Favorite songs (user-curated) ────────────────────────────────
+
+let _favSongs = [];   // [{ id, title, artist }]
+const favIds = () => _favSongs.map(s => s.id);
+
+// Update the list at once, persist in the background, roll back on failure
+async function saveFavorites(next) {
+  const prev = _favSongs;
+  renderFavoriteSongs(next);
+  try { await api.put('/api/profile/favorites', { ids: favIds() }); }
+  catch { renderFavoriteSongs(prev); showToast('Erreur de sauvegarde'); }
+}
+
+function renderFavoriteSongs(songs) {
+  _favSongs = songs;
   const el = document.getElementById('profile-top-songs');
-  if (!songs?.length) { el.innerHTML = `<p class="profile-empty">Aucune session enregistrée</p>`; return; }
-  const max = songs[0].plays;
-  el.innerHTML = songs.map((s, i) => `
-    <div class="top-row">
-      <span class="top-rank">${i + 1}</span>
-      <div class="top-bar-wrap">
-        <div class="top-bar-label">${esc(s.title)} <span class="top-artist">${esc(s.artist)}</span></div>
-        <div class="top-bar-track"><div class="top-bar-fill" style="width:${Math.round(s.plays/max*100)}%"></div></div>
+  el.innerHTML = `
+    <div class="fav-list" id="fav-list">
+      ${songs.length
+        ? songs.map((s, i) => `
+            <div class="top-row fav-item" data-id="${esc(s.id)}">
+              <span class="top-rank">${i + 1}</span>
+              <div class="top-bar-wrap">
+                <div class="top-bar-label">${esc(s.title)} <span class="top-artist">${esc(s.artist)}</span></div>
+              </div>
+              <button class="fav-remove-btn" data-id="${esc(s.id)}" title="Retirer">✕</button>
+            </div>`).join('')
+        : `<p class="profile-empty">Aucune chanson favorite définie</p>`}
+    </div>
+    ${songs.length < 5
+      ? `<button class="fav-add-btn" id="fav-add-btn">+ Ajouter une chanson</button>`
+      : ''}`;
+
+  el.querySelectorAll('.fav-remove-btn').forEach(btn => {
+    btn.addEventListener('click', () => saveFavorites(_favSongs.filter(s => s.id !== btn.dataset.id)));
+  });
+
+  document.getElementById('fav-add-btn')?.addEventListener('click', () => openFavPicker());
+}
+
+function openFavPicker() {
+  const existing = document.getElementById('fav-picker-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'fav-picker-modal';
+  modal.className = 'fav-picker-modal';
+  modal.innerHTML = `
+    <div class="fav-picker-box">
+      <div class="fav-picker-header">
+        <span>Choisir une chanson favorite</span>
+        <button class="fav-picker-close" id="fav-picker-close">✕</button>
       </div>
-      <span class="top-count">${s.plays}</span>
+      <input type="text" id="fav-picker-search" class="fav-picker-input" placeholder="Rechercher titre ou artiste…" autocomplete="off">
+      <div class="fav-picker-results" id="fav-picker-results"></div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  document.getElementById('fav-picker-close').addEventListener('click', () => modal.remove());
+
+  let debounce;
+  const search = document.getElementById('fav-picker-search');
+  search.addEventListener('input', e => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => searchFavSongs(e.target.value), 120);
+  });
+  search.focus();
+}
+
+async function searchFavSongs(q) {
+  if (q.trim().length < 2) { document.getElementById('fav-picker-results').innerHTML = ''; return; }
+  const data = await api.get(`/api/songs?search=${encodeURIComponent(q)}&limit=8&offset=0`);
+  const results = document.getElementById('fav-picker-results');
+  if (!results) return;
+  const ids = favIds();
+  results.innerHTML = (data.songs || []).map(s => `
+    <div class="fav-picker-row ${ids.includes(s.id) ? 'fav-picker-already' : ''}"
+         data-id="${esc(s.id)}" data-title="${esc(s.title)}" data-artist="${esc(s.artist)}">
+      <span class="fav-picker-title">${esc(s.title)}</span>
+      <span class="fav-picker-artist">${esc(s.artist)}</span>
+      ${ids.includes(s.id) ? '<span class="fav-picker-check">✓</span>' : ''}
     </div>`).join('');
+
+  results.querySelectorAll('.fav-picker-row:not(.fav-picker-already)').forEach(row => {
+    row.addEventListener('click', () => {
+      if (_favSongs.length >= 5) { showToast('Maximum 5 chansons favorites'); return; }
+      document.getElementById('fav-picker-modal')?.remove();
+      const { id, title, artist } = row.dataset;
+      saveFavorites([..._favSongs, { id, title, artist }]);
+    });
+  });
 }

@@ -39,12 +39,12 @@ export function scorePill(score) {
 
 /** Full text label for a mastery level. Returns '' for unset/default. */
 export function masteryLabel(m) {
-  return { maitrisee: 'Apprise', revision: 'A revoir', prevue: 'En cours' }[m] || '';
+  return { maitrisee: 'Apprise', revision: 'À revoir', prevue: 'En cours' }[m] || '';
 }
 
 /** Compact coloured text badge for a mastery level. Returns '' for unset/default. */
 export function masteryIcon(mastery) {
-  const label = { maitrisee: 'Apprise', revision: 'A revoir', prevue: 'En cours' }[mastery];
+  const label = { maitrisee: 'Apprise', revision: 'À revoir', prevue: 'En cours' }[mastery];
   return label ? `<span class="mastery-mini ${mastery}">${label}</span>` : '';
 }
 
@@ -70,3 +70,54 @@ export function showToast(msg) {
   clearTimeout(_toastTimer);
   _toastTimer = setTimeout(() => { t.style.opacity = '0'; }, 2500);
 }
+
+// ── Dialogs (styled replacements for prompt / confirm) ──────────────
+
+// Resolves with the trimmed text (empty only if allowEmpty), or null if cancelled. With `input: false`
+// it acts as a confirm and resolves true / null.
+function openDialog({ title, message = '', value = '', placeholder = '', maxLength = 200,
+                      confirmLabel = 'OK', danger = false, input = true, allowEmpty = false }) {
+  return new Promise(resolve => {
+    const wrap = document.createElement('div');
+    wrap.className = 'app-dialog';
+    wrap.innerHTML = `
+      <div class="app-dialog-box" role="dialog" aria-modal="true" aria-labelledby="app-dialog-title">
+        <div class="app-dialog-title" id="app-dialog-title">${esc(title)}</div>
+        ${message ? `<p class="app-dialog-msg">${esc(message)}</p>` : ''}
+        ${input ? `<input class="app-dialog-input" type="text" maxlength="${maxLength}"
+                     placeholder="${esc(placeholder)}" value="${esc(value)}" autocomplete="off">` : ''}
+        <div class="app-dialog-actions">
+          <button type="button" class="app-dialog-btn cancel">Annuler</button>
+          <button type="button" class="app-dialog-btn confirm${danger ? ' danger' : ''}">${esc(confirmLabel)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+
+    const field = wrap.querySelector('.app-dialog-input');
+    const done = result => {
+      document.removeEventListener('keydown', onKey, true);
+      wrap.classList.add('closing');
+      setTimeout(() => wrap.remove(), 160);
+      resolve(result);
+    };
+    const confirm = () => {
+      if (!input) return done(true);
+      const v = field.value.trim();
+      if (v || allowEmpty) done(v); else field.focus();
+    };
+    // Capture phase so Enter/Escape never reach the page-level shortcuts
+    const onKey = e => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); done(null); }
+      else if (e.key === 'Enter') { e.preventDefault(); e.stopImmediatePropagation(); confirm(); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    wrap.addEventListener('mousedown', e => { if (e.target === wrap) done(null); });
+    wrap.querySelector('.cancel').addEventListener('click', () => done(null));
+    wrap.querySelector('.confirm').addEventListener('click', confirm);
+    (field || wrap.querySelector('.confirm')).focus();
+    field?.select();
+  });
+}
+
+export const promptDialog  = opts => openDialog({ ...opts, input: true });
+export const confirmDialog = opts => openDialog({ ...opts, input: false });

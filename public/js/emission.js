@@ -1,7 +1,7 @@
-// ═══ EMISSION — mode émission NOPLP ════════════════════════════════
+// ═══ EMISSION — mode émission NOPLR ════════════════════════════════
 import { state }      from './state.js';
 import { api }        from './api.js';
-import { esc }        from './utils.js';
+import { esc, confirmDialog } from './utils.js';
 import { startGame }  from './game.js';
 
 // ── Module-level emission state ───────────────────────────────────
@@ -15,6 +15,9 @@ let playerMode          = 'duel';
 let scores              = [0, 0];
 let _user               = null;
 let _duelNames          = ['', ''];  // [player1 name, player2 name]
+let _revealNext         = false;     // play the category reveal on the next render
+let _shownScores        = [0, 0];    // scores as last displayed, to detect updates
+let _saved              = false;     // finished emission already recorded
 
 const SOURCE_LABEL = {
   real:      'Vraies catégories',
@@ -27,65 +30,64 @@ function categoryCount() {
   return (emissionData?.pairs || []).filter(p => p && !p.nonPrise).length;
 }
 
-// ── Avatar helpers ────────────────────────────────────────────────
+// ── Player cards (photo + name bar + LED score box) ───────────────
 
-const AVATAR_COLORS = ['#3a7bd5','#e05555','#4caf7d','#f0c060','#9b59b6','#e67e22'];
-function avatarColor(name) {
-  let h = 0;
-  for (const c of (name || '')) h = (h * 31 + c.charCodeAt(0)) & 0xffff;
-  return AVATAR_COLORS[h % AVATAR_COLORS.length];
+function photoHtml(name, avatarUrl) {
+  if (avatarUrl) return `<img src="${esc(avatarUrl)}" alt="">`;
+  return `<span class="ep-initials">${esc((name || '?').slice(0, 2).toUpperCase())}</span>`;
 }
 
-function playerAvatarHtml(name, avatarUrl) {
-  if (avatarUrl) {
-    return `<div class="ep-avatar"><img src="${avatarUrl}" alt=""></div>`;
-  }
-  const initials = (name || '?').slice(0, 2).toUpperCase();
-  const color    = avatarColor(name);
-  return `<div class="ep-avatar" style="background:${color}">${esc(initials)}</div>`;
-}
+const LED_RECT = '<rect x="3" y="3" width="144" height="62" rx="11"/>';
 
-// ── Board rendering ───────────────────────────────────────────────
-
-const LEVEL_COLOR = {
-  50: '#0d4a2e', 40: '#2e3d0d', 30: '#0d2a4a', 20: '#4a0d0d', 10: '#2a0d4a',
-};
-
-function bannersHtml(allDone) {
-  if (playerMode === 'solo') {
-    const name = _user?.username || 'Joueur';
-    return `
-      <div class="emission-players solo">
-        <div class="emission-player active">
-          ${playerAvatarHtml(name, _user?.avatar_url)}
-          <div class="ep-name">${esc(name)}</div>
-          <div class="ep-score">${scores[0]}</div>
-        </div>
-      </div>`;
-  }
-  const p1 = !allDone && currentPlayer === 1;
-  const p2 = !allDone && currentPlayer === 2;
-  const lead = allDone
-    ? (scores[0] === scores[1] ? '' : (scores[0] > scores[1] ? 'win-left' : 'win-right'))
-    : '';
-  const n1 = _duelNames[0] || 'Joueur 1';
-  const n2 = _duelNames[1] || 'Joueur 2';
-  const av1 = _duelNames[0] === _user?.username ? playerAvatarHtml(n1, _user?.avatar_url) : playerAvatarHtml(n1);
+function playerCardHtml(slot, name, avatarUrl, { active, winner }) {
   return `
-    <div class="emission-players duel ${lead}">
-      <div class="emission-player${p1 ? ' active' : ''}${lead === 'win-left' ? ' winner' : ''}">
-        ${av1}
-        <div class="ep-name">${esc(n1)}</div>
-        <div class="ep-score">${scores[0]}</div>
-      </div>
-      <div class="emission-vs">${allDone ? 'FIN' : 'VS'}</div>
-      <div class="emission-player${p2 ? ' active' : ''}${lead === 'win-right' ? ' winner' : ''}">
-        ${playerAvatarHtml(n2)}
-        <div class="ep-name">${esc(n2)}</div>
-        <div class="ep-score">${scores[1]}</div>
+    <div class="ep-card p${slot + 1}${active ? ' active' : ''}${winner ? ' winner' : ''}">
+      <div class="ep-photo">${photoHtml(name, avatarUrl)}</div>
+      <div class="ep-namebar">${esc(name)}</div>
+      <div class="ep-scorebox" data-slot="${slot}">
+        <svg class="ep-leds" viewBox="0 0 150 68" aria-hidden="true">${LED_RECT}</svg>
+        <svg class="ep-leds bright" viewBox="0 0 150 68" aria-hidden="true">${LED_RECT}</svg>
+        <div class="ep-scorebox-inner"><span class="ep-score">${_shownScores[slot]}</span></div>
       </div>
     </div>`;
 }
+
+function playerCardsHtml(allDone) {
+  if (playerMode === 'solo') {
+    return playerCardHtml(0, _user?.username || 'Joueur', _user?.avatar_url, { active: false, winner: false });
+  }
+  const lead = allDone && scores[0] !== scores[1] ? (scores[0] > scores[1] ? 0 : 1) : -1;
+  const n1 = _duelNames[0] || 'Joueur 1';
+  const n2 = _duelNames[1] || 'Joueur 2';
+  const av1 = n1 === _user?.username ? _user?.avatar_url : null;
+  return playerCardHtml(0, n1, av1,  { active: !allDone && currentPlayer === 1, winner: lead === 0 })
+       + playerCardHtml(1, n2, null, { active: !allDone && currentPlayer === 2, winner: lead === 1 });
+}
+
+function countUp(el, from, to, duration, delay) {
+  const start = performance.now() + delay;
+  const step = now => {
+    const t = Math.min(1, Math.max(0, (now - start) / duration));
+    el.textContent = Math.round(from + (to - from) * (1 - Math.pow(1 - t, 3)));
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+// Cards render the previously shown score; if it changed, spin the LEDs and count up.
+function animateScoreUpdates(container) {
+  scores.forEach((val, slot) => {
+    const from = _shownScores[slot];
+    if (val === from) return;
+    _shownScores[slot] = val;
+    const box = container.querySelector(`.ep-scorebox[data-slot="${slot}"]`);
+    if (!box) return;
+    box.classList.add('led-run');
+    countUp(box.querySelector('.ep-score'), from, val, 900, 250);
+  });
+}
+
+// ── Board rendering ───────────────────────────────────────────────
 
 function doneMessage() {
   const n1 = _duelNames[0] || 'Joueur 1';
@@ -102,7 +104,7 @@ export function renderEmissionBoard() {
     const ownName = _user?.username || '';
     container.innerHTML = `
       <div class="emission-empty">
-        <div class="emission-logo">N'OUBLIEZ PAS LES PAROLES</div>
+        <div class="emission-logo">N'OUBLIEZ PAS LES RÉVISIONS</div>
 
         <p class="emission-empty-text">Type de partie :</p>
         <div class="emission-playermode">
@@ -159,31 +161,33 @@ export function renderEmissionBoard() {
   const mcUnlocked = playedCount >= totalCats;
   const mcPlayed   = emissionData.mcSong?.played;
   const allDone    = mcPlayed || (mcUnlocked && !emissionData.mcSong);
+  if (allDone && !_saved) {
+    _saved = true;
+    api.post('/api/emission/complete', {
+      source: emissionSource, mode: playerMode, score: scores[0], oppScore: playerMode === 'duel' ? scores[1] : null,
+    }).catch(() => {});
+  }
 
-  const tilesHtml = emissionData.pairs.map(pair => {
-    if (!pair) return '';
-    const played   = pair.played;
-    const nonPrise = pair.nonPrise;
-    const color    = LEVEL_COLOR[pair.level] || '#1a1a2e';
-    return `
-      <div class="emission-tile${played ? ' played' : ''}${nonPrise ? ' non-prise' : ''}"
-           data-level="${pair.level}" style="--tile-bg: ${color}">
-        <div class="emission-tile-pts">${pair.level}<span>pts</span></div>
-        <div class="emission-tile-name">${esc(pair.categoryName)}</div>
-        ${played    ? '<div class="emission-tile-check">Joué</div>' : ''}
-        ${nonPrise  ? '<div class="emission-tile-check">Non prise</div>' : ''}
-      </div>`;
-  }).join('');
+  // Displayed top → bottom: MC, then highest level first. The reveal plays
+  // bottom → top, so --i (the stagger index) counts from the bottom.
+  const pairs = emissionData.pairs.filter(Boolean).sort((a, b) => b.level - a.level);
+  const tilesHtml = pairs.map((pair, idx) => `
+      <div class="emission-tile${pair.played ? ' played' : ''}${pair.nonPrise ? ' non-prise' : ''}"
+           data-level="${pair.level}" style="--i:${pairs.length - 1 - idx}">
+        <div class="emission-tile-name"><span class="tile-text">${esc(pair.categoryName)}</span></div>
+        <div class="emission-tile-pts"><span class="tile-text">${pair.level}</span></div>
+        ${pair.nonPrise ? '<div class="emission-tile-check">Non prise</div>' : ''}
+      </div>`).join('');
 
   const remaining = totalCats - playedCount;
   const mcLockMsg = remaining > 0 ? `Jouez encore ${remaining} catégorie${remaining > 1 ? 's' : ''}` : '';
   const mcHtml = emissionData.mcSong ? `
     <div class="emission-tile emission-mc-tile${!mcUnlocked ? ' locked' : ''}${mcPlayed ? ' played' : ''}"
-         id="emission-mc-tile">
-      <div class="emission-mc-star">★</div>
-      <div class="emission-mc-label">C'EST LA MÊME CHANSON</div>
-      ${!mcUnlocked ? `<div class="emission-mc-lock">${mcLockMsg}</div>` : ''}
-      ${mcPlayed ? '<div class="emission-tile-check">Joué</div>' : ''}
+         id="emission-mc-tile" style="--i:${pairs.length}">
+      <div class="emission-tile-name"><span class="tile-text">
+        <span class="emission-mc-label">C'est la même chanson</span>
+        ${!mcUnlocked ? `<span class="emission-mc-lock">${mcLockMsg}</span>` : ''}
+      </span></div>
     </div>` : '';
 
   const n1 = _duelNames[0] || 'Joueur 1';
@@ -193,20 +197,30 @@ export function renderEmissionBoard() {
         ? `<div class="emission-turn">Au tour de <strong>${esc(currentPlayer === 1 ? n1 : (_duelNames[1] || 'Joueur 2'))}</strong></div>`
         : '');
 
+  const reveal = _revealNext;
+  _revealNext = false;
+
   container.innerHTML = `
     <div class="emission-board">
       <div class="emission-board-header">
-        <div class="emission-board-title">N'OUBLIEZ PAS LES PAROLES</div>
+        <div class="emission-board-title">N'OUBLIEZ PAS LES RÉVISIONS</div>
         <div class="emission-board-sub">${esc(SOURCE_LABEL[emissionSource] || 'Mode Émission')}</div>
       </div>
-      ${bannersHtml(allDone)}
       ${statusHtml}
-      <div class="emission-tiles">
-        ${tilesHtml}
-        ${mcHtml}
+      <div class="emission-stage ${playerMode}">
+        ${playerCardsHtml(allDone)}
+        <div class="emission-tiles${reveal ? ' revealing' : ''}">
+          ${mcHtml}
+          ${tilesHtml}
+        </div>
       </div>
-      <button id="btn-new-emission" class="btn-ghost btn-sm emission-new-btn">↺ Nouvelle émission</button>
+      <div class="emission-actions">
+        <button id="btn-quit-emission" class="emission-action-btn">${allDone ? '← Retour au menu' : '✕ Abandonner'}</button>
+        <button id="btn-new-emission" class="emission-action-btn">↺ Nouvelle émission</button>
+      </div>
     </div>`;
+
+  animateScoreUpdates(container);
 
   container.querySelectorAll('.emission-tile[data-level]').forEach(tile => {
     if (tile.classList.contains('played'))    return;
@@ -222,8 +236,20 @@ export function renderEmissionBoard() {
   const mcTile = document.getElementById('emission-mc-tile');
   if (mcTile && mcUnlocked && !mcPlayed) mcTile.addEventListener('click', startMcGame);
 
-  document.getElementById('btn-new-emission')?.addEventListener('click', () => {
-    if (!confirm('Générer une nouvelle émission ?')) return;
+  document.getElementById('btn-quit-emission')?.addEventListener('click', async () => {
+    const ok = allDone || await confirmDialog({
+      title: "Abandonner l'émission ?",
+      message: 'Retour au menu de création. La partie en cours sera perdue.',
+      confirmLabel: 'Abandonner',
+      danger: true,
+    });
+    if (!ok) return;
+    resetEmission();
+    renderEmissionBoard();
+  });
+
+  document.getElementById('btn-new-emission')?.addEventListener('click', async () => {
+    if (!await confirmDialog({ title: 'Générer une nouvelle émission ?', message: 'La partie en cours sera perdue.', confirmLabel: 'Générer' })) return;
     const src = emissionSource;
     resetEmission();
     generateEmission(src);
@@ -352,7 +378,7 @@ function openPick(pair) {
   document.getElementById('emission-pick-songs').innerHTML = pair.songs.map(song => `
     <div class="emission-song-card" data-id="${esc(song.id)}" data-blank-level="${song.blankLevel || pair.level}">
       <div class="emission-song-title">${esc(song.title)}</div>
-      <div class="emission-song-artist">${esc(song.artist)}${song.year ? ' · ' + song.year : ''}</div>
+      <div class="emission-song-artist">${esc(song.artist)}${song.year ? ' - ' + song.year : ''}</div>
       <div class="emission-song-play">▶ Choisir</div>
     </div>`).join('');
   const modal = document.getElementById('emission-pick-modal');
@@ -416,18 +442,21 @@ function resetEmission() {
   currentPlayer       = 1;
   currentPlayingLevel = null;
   scores              = [0, 0];
+  _shownScores        = [0, 0];
+  _saved              = false;
 }
 
 async function generateEmission(source = 'real', episodeId = null) {
   emissionSource = source;
   const container = document.getElementById('emission-container');
-  container.innerHTML = `<div class="emission-loading">Génération de l'émission…</div>`;
 
-  // Save duel names from inputs before the board re-renders
+  // Save duel names from inputs before the loading message replaces them
   const n1 = document.getElementById('duel-name-1')?.value.trim();
   const n2 = document.getElementById('duel-name-2')?.value.trim();
   if (n1) _duelNames[0] = n1;
   if (n2) _duelNames[1] = n2;
+
+  container.innerHTML = `<div class="emission-loading">Génération de l'émission…</div>`;
   // Solo: reset so banner uses real user info
   if (playerMode === 'solo') _duelNames = ['', ''];
 
@@ -441,6 +470,9 @@ async function generateEmission(source = 'real', episodeId = null) {
     playedCount   = 0;
     currentPlayer = 1;
     scores        = [0, 0];
+    _shownScores  = [0, 0];
+    _saved        = false;
+    _revealNext   = true;
     renderEmissionBoard();
   } catch (err) {
     container.innerHTML = `

@@ -21,6 +21,7 @@ export async function openModeModal(id) {
 
   document.getElementById('mode-title').textContent  = data.title;
   document.getElementById('mode-artist').textContent = data.artist;
+  renderStatus(data.mastery);
 
   // Video source toggle — show when at least one URL exists, disable unavailable options
   const hasVideo   = !!data.youtube_url?.trim();
@@ -102,6 +103,33 @@ export async function openModeModal(id) {
 
   document.getElementById('mode-modal').classList.remove('hidden');
   document.body.style.overflow = 'hidden';
+}
+
+// ── Song status (Apprise / En cours / À revoir / Aucun) ──────────────
+
+function renderStatus(mastery) {
+  const current = mastery || 'non_maitrisee';
+  document.querySelectorAll('.mode-status-btn').forEach(b =>
+    b.classList.toggle('current', b.dataset.mastery === current));
+}
+
+// Highlight at once, save in the background, roll back on failure
+async function setSongStatus(mastery) {
+  const song = state.song;
+  if (!song) return;
+  const prev = song.mastery;
+  const announce = m => document.dispatchEvent(new CustomEvent('mastery-changed', { detail: { id: song.id, mastery: m || 'non_maitrisee' } }));
+  song.mastery = mastery === 'non_maitrisee' ? null : mastery;
+  renderStatus(song.mastery);
+  announce(song.mastery);
+  try {
+    await api.put('/api/songs/' + encodeURIComponent(song.id) + '/mastery', { mastery });
+  } catch {
+    song.mastery = prev;
+    renderStatus(prev);
+    announce(prev);
+    showToast('Erreur de sauvegarde');
+  }
 }
 
 export function closeModeModal() {
@@ -287,6 +315,7 @@ export async function closeGame() {
   document.getElementById('game-modal').classList.add('hidden');
   document.body.style.overflow = '';
   state.song = null;
+  document.dispatchEvent(new CustomEvent('game-closed'));
 
   if (state.view === 'emission') {
     const { onEmissionGameClose } = await import('./emission.js');
@@ -301,6 +330,8 @@ export async function closeGame() {
 
 export function initGame() {
   document.getElementById('btn-close-mode').addEventListener('click', closeModeModal);
+  document.querySelectorAll('.mode-status-btn').forEach(btn =>
+    btn.addEventListener('click', () => setSongStatus(btn.dataset.mastery)));
   document.getElementById('mode-overlay').addEventListener('click', closeModeModal);
   document.getElementById('btn-close-game').addEventListener('click', closeGame);
   document.getElementById('modal-overlay').addEventListener('click', closeGame);

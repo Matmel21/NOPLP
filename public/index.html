@@ -3,18 +3,58 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NOPLP — Révision</title>
+  <title>NOPLR — N'oubliez pas les révisions</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
+<!-- Mic icon sprite (kept out of layout, not display:none so gradients resolve) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <radialGradient id="mic-head" cx="38%" cy="32%" r="75%">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".45" stop-color="#d6ebff"/>
+      <stop offset="1" stop-color="#5f93d4"/>
+    </radialGradient>
+    <linearGradient id="mic-chrome" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7a8ea8"/>
+      <stop offset=".5" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#6b7f99"/>
+    </linearGradient>
+    <linearGradient id="mic-shade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#000" stop-opacity=".45"/>
+      <stop offset=".45" stop-color="#fff" stop-opacity=".25"/>
+      <stop offset="1" stop-color="#000" stop-opacity=".5"/>
+    </linearGradient>
+    <pattern id="mic-check" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="4" height="4" fill="#e9f2ff"/>
+      <rect width="2" height="2" fill="#1c2940"/>
+      <rect x="2" y="2" width="2" height="2" fill="#1c2940"/>
+    </pattern>
+    <clipPath id="mic-head-clip"><circle cx="32" cy="18" r="13"/></clipPath>
+  </defs>
+  <symbol id="noplr-mic" viewBox="18 3 28 60">
+    <g>
+      <path d="M26 35 L38 35 L35.5 59 Q32 62 28.5 59 Z" fill="url(#mic-check)"/>
+      <path d="M26 35 L38 35 L35.5 59 Q32 62 28.5 59 Z" fill="url(#mic-shade)"/>
+      <rect x="24.5" y="29.5" width="15" height="6" rx="2" fill="url(#mic-chrome)"/>
+      <circle cx="32" cy="18" r="13" fill="url(#mic-head)"/>
+      <g clip-path="url(#mic-head-clip)" stroke="#3b6fb0" stroke-opacity=".45" stroke-width=".8">
+        <path d="M10 10 L40 40 M14 4 L44 34 M18 -2 L48 28 M6 16 L36 46 M2 22 L32 52"/>
+        <path d="M54 10 L24 40 M50 4 L20 34 M46 -2 L16 28 M58 16 L28 46 M62 22 L32 52"/>
+      </g>
+      <circle cx="32" cy="18" r="13" fill="none" stroke="#f2f8ff" stroke-width="1"/>
+      <circle cx="27" cy="12.5" r="2.2" fill="#fff"/>
+      <circle cx="36.5" cy="21" r="1.1" fill="#fff" opacity=".9"/>
+    </g>
+  </symbol>
+</svg>
 
 <!-- NAV -->
 <nav class="nav">
   <div class="nav-brand">
-    <span class="brand-accent">N</span>OPLP
-    <span class="brand-sub">révision</span>
+    <span class="brand-accent">N</span>OPLR<span class="brand-mic-wrap"><svg class="brand-mic" aria-hidden="true"><use href="#noplr-mic"/></svg></span>
   </div>
   <div class="nav-links">
     <button class="nav-btn active" data-view="home">
@@ -42,41 +82,7 @@
 
 <!-- ── VIEW: HOME ──────────────────────────────────────── -->
 <section id="view-home" class="view active">
-  <div class="home-hero">
-    <div>
-      <div class="home-greeting">Bonjour, <span id="home-username"></span></div>
-    </div>
-    <div class="home-date" id="home-date"></div>
-  </div>
-
-  <div class="home-actions">
-    <div class="home-action-card" id="home-btn-quick">
-      <div class="home-action-icon">🎯</div>
-      <div class="home-action-title">Révision rapide</div>
-      <div class="home-action-sub">Chanson aléatoire de votre playlist</div>
-    </div>
-    <div class="home-action-card" id="home-btn-emission">
-      <div class="home-action-icon">📺</div>
-      <div class="home-action-title">Mode Émission</div>
-      <div class="home-action-sub">Simulez l'émission</div>
-    </div>
-    <div class="home-action-card" id="home-btn-library">
-      <div class="home-action-icon">⊞</div>
-      <div class="home-action-title">Bibliothèque</div>
-      <div class="home-action-sub">Cherchez une chanson</div>
-    </div>
-  </div>
-
-  <div class="home-sections">
-    <div class="home-section">
-      <div class="home-section-title">Reprendre</div>
-      <div id="home-recents"></div>
-    </div>
-    <div class="home-section">
-      <div class="home-section-title">Playlist</div>
-      <div id="home-playlist"></div>
-    </div>
-  </div>
+  <div id="home-root" class="home-root"></div>
 </section>
 
 <!-- ── VIEW: LIBRARY ───────────────────────────────────── -->
@@ -93,40 +99,37 @@
       </div>
       <select id="type-filter">
         <option value="">Tous</option>
-        <option value="mc">Même Chanson</option>
+        <option value="mc">Même chanson</option>
         <option value="fn">Finale</option>
+        <option value="mal_aimees">Mal aimées</option>
+        <option value="year_todo">Tubes de l'année à apprendre</option>
         <option value="none">Aucun</option>
       </select>
       <select id="mastery-filter">
         <option value="">Tous</option>
         <option value="maitrisee">Apprises</option>
-        <option value="revision">A revoir</option>
+        <option value="revision">À revoir</option>
         <option value="prevue">En cours</option>
         <option value="non_maitrisee">Aucun</option>
       </select>
       <select id="sort-filter">
-        <option value="">A a Z</option>
-        <option value="z_a">Z a A</option>
-        <option value="word_count_asc">Nombre de mots asc</option>
-        <option value="word_count_desc">Nombre de mots desc</option>
-        <option value="mc_count_desc">Apparitions MC</option>
+        <option value="">A à Z</option>
+        <option value="z_a">Z à A</option>
+        <option value="word_count_asc">Nombre de mots (croissant)</option>
+        <option value="word_count_desc">Nombre de mots (décroissant)</option>
+        <option value="mc_count_desc">Apparitions Même chanson</option>
         <option value="fn_count_desc">Apparitions Finale</option>
         <option value="show_count_desc">Apparitions totales</option>
-        <option value="year_asc">Annee de sortie</option>
-        <option value="mal_aimees">Mal aimees</option>
+        <option value="year_asc">Année de sortie</option>
+        <option value="aired_desc">Diffusions (12 derniers mois)</option>
       </select>
       <span id="song-count" class="song-count"></span>
-      <button id="btn-bulk-mode" class="btn-bulk-mode">Sélection</button>
+      <button id="btn-import-list" class="btn-import" title="Coller une liste de chansons et leur donner un statut d'un coup">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h8M4 6h.01M4 12h.01M4 18h.01"/></svg>
+        Importer une liste
+      </button>
     </div>
-  </div>
-  <!-- Bulk tagging bar — hidden until selection mode is active -->
-  <div id="bulk-bar" class="bulk-bar hidden">
-    <span id="bulk-count" class="bulk-count">Cliquez sur des chansons pour les sélectionner</span>
-    <div class="bulk-actions">
-      <button class="bulk-apply-btn maitrisee" data-mastery="maitrisee" disabled>✓ Apprise</button>
-      <button class="bulk-apply-btn revision"  data-mastery="revision"  disabled>↺ À revoir</button>
-      <button class="bulk-apply-btn prevue"    data-mastery="prevue"    disabled>◎ En cours</button>
-      <button class="bulk-apply-btn"           data-mastery=""          disabled>✕ Aucun</button>
+    <div class="lib-hint">Survolez une chanson puis tapez <kbd>1</kbd> Apprise · <kbd>2</kbd> En cours · <kbd>3</kbd> À revoir · <kbd>0</kbd> Aucun
     </div>
   </div>
   <div id="song-grid" class="song-grid"></div>
@@ -172,7 +175,6 @@
   <div class="profile-section">
     <div class="profile-section-header">
       <span class="profile-section-title">Activité</span>
-      <span id="profile-streak" class="streak-badge"></span>
     </div>
     <div id="profile-activity"></div>
   </div>
@@ -186,7 +188,7 @@
   <!-- Top artists + top songs -->
   <div class="profile-tops">
     <div class="profile-section">
-      <div class="profile-section-title">Artistes préférés</div>
+      <div class="profile-section-title">Artistes favoris</div>
       <div id="profile-top-artists"></div>
     </div>
     <div class="profile-section">
@@ -244,6 +246,12 @@
     <div class="mode-song-info">
       <div id="mode-title" class="mode-song-title"></div>
       <div id="mode-artist" class="mode-song-artist"></div>
+    </div>
+    <div class="mode-status" id="mode-status">
+      <button class="mode-status-btn maitrisee" data-mastery="maitrisee">Apprise</button>
+      <button class="mode-status-btn prevue" data-mastery="prevue">En cours</button>
+      <button class="mode-status-btn revision" data-mastery="revision">À revoir</button>
+      <button class="mode-status-btn none" data-mastery="non_maitrisee">Aucun</button>
     </div>
     <h3 class="mode-heading">Choisir un mode</h3>
 
@@ -354,8 +362,7 @@
 <div id="auth-overlay" class="auth-overlay hidden">
   <div class="auth-card">
     <div class="auth-brand">
-      <span class="brand-accent">N</span>OPLP
-      <span class="brand-sub">révision</span>
+      <span class="brand-accent">N</span>OPLR<span class="brand-mic-wrap"><svg class="brand-mic" aria-hidden="true"><use href="#noplr-mic"/></svg></span>
     </div>
     <h2 id="auth-title" class="auth-heading">Connexion</h2>
     <form id="auth-form" class="auth-form" autocomplete="on">

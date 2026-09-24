@@ -1,7 +1,8 @@
 // ═══ LIBRARY — song grid, filters, pagination, playlists ═══════════
 import { state }              from './state.js';
 import { api }                from './api.js';
-import { esc, masteryIcon, showToast } from './utils.js';
+import { esc, masteryIcon, showToast, promptDialog, confirmDialog } from './utils.js';
+import { openImportDialog }   from './import.js';
 
 let _playlists = [];
 
@@ -34,6 +35,7 @@ function sortStatBadge(s) {
     fn_count_desc:   { val: s.fn_count,   cls: 'fn', text: v => `${v} fois Finale` },
     word_count_asc:  { val: s.word_count, cls: '',   text: v => `${v} mots` },
     word_count_desc: { val: s.word_count, cls: '',   text: v => `${v} mots` },
+    aired_desc:      { val: s.aired_12m,  cls: '',   text: v => `${v} fois cette année` },
     mal_aimees: (() => {
       const total = (s.chosen_count || 0) + (s.not_chosen_count || 0);
       if (!total) return null;
@@ -41,7 +43,7 @@ function sortStatBadge(s) {
       return { val: total, cls: '', text: () => `${pct}% choisie (${s.chosen_count}/${total})` };
     })(),
   };
-  const e = map[state.sort];
+  const e = map[state.sort || { mal_aimees: 'mal_aimees', year_todo: 'aired_desc' }[state.type] || ''];
   if (!e || !e.val) return '';
   return `<div class="song-card-stat ${e.cls}">${e.text(e.val)}</div>`;
 }
@@ -58,38 +60,60 @@ function renderSongGrid(songs, total) {
   }
 
   grid.innerHTML = songs.map(s => {
-    const hasVideo = s.youtube_url?.trim();
-    const best     = s.best_score != null ? `<span class="song-card-score">${s.best_score}%</span>` : '';
+    const hasVideo  = s.youtube_url?.trim();
+    const best      = s.attempts > 0 && s.best_score != null ? `<span class="song-card-score">${s.best_score}%</span>` : '';
+    const alts      = s.alt_versions || [];
+    const altBadge  = alts.length
+      ? `<span class="song-versions-badge" title="${alts.map(v => esc(v.artist) + (v.year ? ' - ' + v.year : '')).join('\n')}">${alts.length + 1} versions</span>`
+      : '';
+    const altData   = alts.length ? ` data-alts='${JSON.stringify(alts)}'` : '';
     return `
-      <div class="song-card" data-id="${s.id}" data-mastery="${s.mastery || ''}">
-        <div class="song-card-title">${esc(s.title)}</div>
-        <div class="song-card-artist">${esc(s.artist)}${s.year ? ' · ' + s.year : ''}</div>
+      <div class="song-card" data-id="${s.id}" data-mastery="${s.mastery || ''}"${altData}>
+        <div class="song-card-actions">
+          <button class="song-star${s.in_default ? ' on' : ''}" data-id="${esc(s.id)}" title="Playlist par défaut"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3L2.9 9.5l6.3-.9z"/></svg></button>
+          <button class="song-pl-btn" data-id="${esc(s.id)}" title="Choisir une playlist"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+        </div>
+        <div class="song-card-title">${esc(s.title)}${altBadge}</div>
+        <div class="song-card-artist">${esc(s.artist)}${s.year ? ' - ' + s.year : ''}</div>
         ${sortStatBadge(s)}
         ${!hasVideo ? '<div class="song-card-unavailable">Clip indisponible</div>' : ''}
         <div class="song-card-meta">
-          <span class="song-card-badge ${s.attempts > 0 ? 'played' : ''}">
-            ${s.attempts > 0 ? `${s.attempts} essai${s.attempts > 1 ? 's' : ''}` : 'Pas joué'}
-          </span>
           ${masteryIcon(s.mastery)}
           ${best}
-          <button class="song-pl-btn" data-id="${s.id}" title="Ajouter à une playlist">☰</button>
+          ${quickStatusHtml(s.mastery)}
         </div>
       </div>`;
   }).join('');
 
   grid.querySelectorAll('.song-card').forEach(card => {
     card.addEventListener('click', async e => {
-      if (e.target.closest('.song-pl-btn')) return;
-      if (_bulkMode) { toggleBulkSelect(card); return; }
+      if (e.target.closest('.song-card-actions, .song-quick')) return;
+      const alts = card.dataset.alts ? JSON.parse(card.dataset.alts) : [];
+      if (alts.length) {
+        openVersionPicker(card, alts);
+        return;
+      }
       const { openModeModal } = await import('./game.js');
       openModeModal(card.dataset.id);
     });
   });
 
   grid.querySelectorAll('.song-pl-btn').forEach(btn => {
-    btn.addEventListener('click', async e => {
+    btn.addEventListener('click', e => {
       e.stopPropagation();
       openPlaylistPicker(btn, btn.dataset.id);
+    });
+  });
+  grid.querySelectorAll('.sq').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      setCardStatus(btn.closest('.song-card'), btn.dataset.mastery);
+    });
+  });
+  grid.querySelectorAll('.song-star').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      toggleStar(btn);
     });
   });
 
@@ -109,6 +133,76 @@ function updatePagination(total) {
 function updatePlaylistCount(playlistId, delta) {
   const chip = document.querySelector(`.pl-chip[data-id="${playlistId}"] .pl-chip-count`);
   if (chip) chip.textContent = Math.max(0, (parseInt(chip.textContent) || 0) + delta);
+}
+
+function defaultPlaylist() {
+  return _playlists.find(p => p.is_default);
+}
+
+function setStar(songId, on) {
+  document.querySelectorAll(`.song-star[data-id="${CSS.escape(songId)}"]`)
+    .forEach(b => b.classList.toggle('on', on));
+}
+
+async function toggleStar(btn) {
+  const pl = defaultPlaylist();
+  if (!pl) return;
+  const songId = btn.dataset.id;
+  const on = !btn.classList.contains('on');
+  try {
+    const url = `/api/playlists/${pl.id}/songs/${encodeURIComponent(songId)}`;
+    if (on) await api.post(url, {}); else await api.delete(url);
+    setStar(songId, on);
+    updatePlaylistCount(pl.id, on ? 1 : -1);
+    btn.classList.remove('pop'); void btn.offsetWidth; btn.classList.add('pop');
+    showToast(on ? `Ajoutée à « ${pl.name} »` : `Retirée de « ${pl.name} »`);
+  } catch { showToast('Erreur'); }
+}
+
+// ── Version picker (grouped duplicate songs) ─────────────────────────
+
+let _activeVersionCard = null;
+
+function closeVersionPicker() {
+  document.getElementById('version-picker-popover')?.remove();
+  _activeVersionCard = null;
+}
+
+async function openVersionPicker(card, alts) {
+  if (_activeVersionCard === card) { closeVersionPicker(); return; }
+  closeVersionPicker();
+  _activeVersionCard = card;
+
+  const primary = { id: card.dataset.id, artist: card.querySelector('.song-card-artist').textContent };
+  const all = [primary, ...alts];
+
+  const popover = document.createElement('div');
+  popover.id = 'version-picker-popover';
+  popover.className = 'pl-picker-popover';
+  popover.innerHTML = `
+    <div class="pl-picker-header">Choisir une version</div>
+    ${all.map(v => `
+      <button class="pl-picker-row version-pick-row" data-id="${v.id}">
+        <span class="pl-picker-name">${esc(v.artist)}${v.year ? ' - ' + v.year : ''}</span>
+      </button>`).join('')}`;
+
+  const rect = card.getBoundingClientRect();
+  popover.style.top  = `${rect.bottom + window.scrollY + 4}px`;
+  popover.style.left = `${Math.min(rect.left + window.scrollX, window.innerWidth - 220)}px`;
+  document.body.appendChild(popover);
+
+  popover.querySelectorAll('.version-pick-row').forEach(row => {
+    row.addEventListener('click', async e => {
+      e.stopPropagation();
+      closeVersionPicker();
+      const { openModeModal } = await import('./game.js');
+      openModeModal(row.dataset.id);
+    });
+  });
+
+  setTimeout(() => {
+    document.addEventListener('click', closeVersionPicker, { once: true });
+  }, 0);
 }
 
 let _activePickerSongId = null;
@@ -158,13 +252,15 @@ async function openPlaylistPicker(btn, songId) {
       const plId = parseInt(row.dataset.pl);
       const inPl = row.classList.contains('active');
       try {
+        const url = `/api/playlists/${plId}/songs/${encodeURIComponent(songId)}`;
         if (inPl) {
-          await api.delete(`/api/playlists/${plId}/songs/${songId}`);
+          await api.delete(url);
           updatePlaylistCount(plId, -1);
         } else {
-          await api.post(`/api/playlists/${plId}/songs/${songId}`, {});
+          await api.post(url, {});
           updatePlaylistCount(plId, 1);
         }
+        if (plId === defaultPlaylist()?.id) setStar(songId, !inPl);
         row.classList.toggle('active', !inPl);
         row.querySelector('.pl-picker-check').textContent = inPl ? '☆' : '★';
         memberIds[inPl ? 'delete' : 'add'](plId);
@@ -177,6 +273,18 @@ async function openPlaylistPicker(btn, songId) {
     document.addEventListener('click', closePicker, { once: true });
   }, 0);
 }
+
+// Open the library on a given list (from the home screen), filters reset
+export function presetLibrary({ type = '', playlist = null } = {}) {
+  Object.assign(state, { type, playlist, page: 0, search: '', mastery: '', sort: '' });
+  document.getElementById('type-filter').value    = type;
+  document.getElementById('mastery-filter').value = '';
+  document.getElementById('sort-filter').value    = '';
+  document.getElementById('search-input').value   = '';
+  renderPlaylistPanel();
+}
+
+export const refreshPlaylists = () => loadPlaylists();
 
 async function loadPlaylists() {
   _playlists = await api.get('/api/playlists');
@@ -207,7 +315,8 @@ function renderPlaylistPanel() {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
       const id = btn.dataset.id;
-      if (!confirm('Supprimer cette playlist ?')) return;
+      const ok = await confirmDialog({ title: 'Supprimer cette playlist ?', confirmLabel: 'Supprimer', danger: true });
+      if (!ok) return;
       await api.delete(`/api/playlists/${id}`);
       if (state.playlist == id) { state.playlist = null; state.page = 0; }
       await loadPlaylists();
@@ -219,112 +328,66 @@ function renderPlaylistPanel() {
 export async function initLibraryPlaylists() {
   await loadPlaylists();
   document.getElementById('btn-new-playlist').addEventListener('click', async () => {
-    const name = prompt('Nom de la playlist :');
-    if (!name?.trim()) return;
+    const name = await promptDialog({ title: 'Nouvelle playlist', placeholder: 'Nom de la playlist', maxLength: 60, confirmLabel: 'Créer' });
+    if (!name) return;
     const pl = await api.post('/api/playlists', { name });
     _playlists.push(pl);
     renderPlaylistPanel();
   });
 }
 
-// ── Mastery tagging ──────────────────────────────────────────────────
-// Individual: click the + button to cycle through states instantly.
-// Bulk: enter selection mode, pick multiple cards, apply a state to all.
+// ── Mastery badge ────────────────────────────────────────────────────
+// Status is set from the song panel (game.js), which announces the change.
 
-const MASTERY_CYCLE = [null, 'maitrisee', 'revision', 'prevue'];
-const MASTERY_LABEL = { maitrisee: 'Apprise', revision: 'À revoir', prevue: 'En cours', '': 'Aucun' };
+const QUICK_STATUS = [
+  { mastery: 'maitrisee',     label: 'Apprise',  key: '1', icon: '✓' },
+  { mastery: 'prevue',        label: 'En cours', key: '2', icon: '◐' },
+  { mastery: 'revision',      label: 'À revoir', key: '3', icon: '↻' },
+  { mastery: 'non_maitrisee', label: 'Aucun',    key: '0', icon: '✕' },
+];
+// Physical keys, so the top row works on AZERTY without Shift
+const KEY_TO_STATUS = {
+  Digit1: 'maitrisee', Numpad1: 'maitrisee',
+  Digit2: 'prevue',    Numpad2: 'prevue',
+  Digit3: 'revision',  Numpad3: 'revision',
+  Digit0: 'non_maitrisee', Numpad0: 'non_maitrisee',
+};
 
-let _bulkMode    = false;
-let _bulkSelected = new Set(); // song ids
-
-// Cycle mastery for a single card and persist.
-async function cycleMastery(btn) {
-  const card    = btn.closest('.song-card');
-  const songId  = btn.dataset.id;
-  const current = card.dataset.mastery || null;
-  const idx     = MASTERY_CYCLE.indexOf(current);
-  const next    = MASTERY_CYCLE[(idx + 1) % MASTERY_CYCLE.length];
-
-  try {
-    await api.put('/api/songs/' + encodeURIComponent(songId) + '/mastery', { mastery: next });
-    applyMasteryToCard(card, next);
-  } catch { showToast('Erreur lors de la mise à jour'); }
+function quickStatusHtml(mastery) {
+  const current = mastery || 'non_maitrisee';
+  return `<div class="song-quick">${QUICK_STATUS.map(q => `
+    <button class="sq ${q.mastery}${q.mastery === current ? ' current' : ''}" data-mastery="${q.mastery}"
+            title="${q.label} (${q.key})" aria-label="${q.label}">${q.icon}</button>`).join('')}</div>`;
 }
 
 function applyMasteryToCard(card, mastery) {
-  card.dataset.mastery = mastery || '';
-  const badge = card.querySelector('.mastery-mini');
-  if (badge) badge.remove();
-  const newBadge = masteryIcon(mastery);
-  if (newBadge) {
-    const ref = card.querySelector('.song-pl-btn') || card.querySelector('.song-card-score');
-    if (ref) ref.insertAdjacentHTML('beforebegin', newBadge);
-    else card.querySelector('.song-card-meta').insertAdjacentHTML('beforeend', newBadge);
-  }
+  const value = mastery === 'non_maitrisee' ? '' : (mastery || '');
+  card.dataset.mastery = value;
+  card.querySelector('.mastery-mini')?.remove();
+  const newBadge = masteryIcon(value);
+  if (newBadge) card.querySelector('.song-card-meta').insertAdjacentHTML('afterbegin', newBadge);
+  card.querySelectorAll('.sq').forEach(b => b.classList.toggle('current', b.dataset.mastery === (value || 'non_maitrisee')));
 }
 
-// Bulk apply mastery to all selected songs.
-async function applyBulkMastery(mastery) {
-  if (!_bulkSelected.size) return;
-  const ids = [..._bulkSelected];
+// Show the new status at once, save in the background, roll back on failure
+async function setCardStatus(card, mastery) {
+  if (!card) return;
+  const prev = card.dataset.mastery || 'non_maitrisee';
+  if (prev === mastery) return;
+  applyMasteryToCard(card, mastery);
+  card.classList.remove('status-flash'); void card.offsetWidth; card.classList.add('status-flash');
   try {
-    await Promise.all(ids.map(id =>
-      api.put('/api/songs/' + encodeURIComponent(id) + '/mastery', { mastery })
-    ));
-    ids.forEach(id => {
-      const card = document.querySelector(`.song-card[data-id="${id}"]`);
-      if (card) applyMasteryToCard(card, mastery);
-    });
-    showToast(`${ids.length} chanson${ids.length > 1 ? 's' : ''} mise${ids.length > 1 ? 's' : ''} à jour`);
-  } catch { showToast('Erreur lors de la mise à jour'); }
-  exitBulkMode();
-}
-
-function enterBulkMode() {
-  _bulkMode = true;
-  _bulkSelected.clear();
-  document.getElementById('song-grid').classList.add('bulk-mode');
-  document.getElementById('bulk-bar').classList.remove('hidden');
-  document.getElementById('btn-bulk-mode').textContent = 'Annuler';
-  updateBulkBar();
-}
-
-function exitBulkMode() {
-  _bulkMode = false;
-  _bulkSelected.clear();
-  document.getElementById('song-grid').classList.remove('bulk-mode');
-  document.getElementById('bulk-bar').classList.add('hidden');
-  document.getElementById('btn-bulk-mode').textContent = 'Sélection';
-  document.querySelectorAll('.song-card.bulk-selected').forEach(c => c.classList.remove('bulk-selected'));
-}
-
-function toggleBulkSelect(card) {
-  const id = card.dataset.id;
-  if (_bulkSelected.has(id)) {
-    _bulkSelected.delete(id);
-    card.classList.remove('bulk-selected');
-  } else {
-    _bulkSelected.add(id);
-    card.classList.add('bulk-selected');
+    await api.put('/api/songs/' + encodeURIComponent(card.dataset.id) + '/mastery', { mastery });
+  } catch {
+    applyMasteryToCard(card, prev);
+    showToast('Erreur de sauvegarde');
   }
-  updateBulkBar();
 }
 
-function updateBulkBar() {
-  const n = _bulkSelected.size;
-  document.getElementById('bulk-count').textContent =
-    n ? `${n} chanson${n > 1 ? 's' : ''} sélectionnée${n > 1 ? 's' : ''}` : 'Cliquez sur des chansons pour les sélectionner';
-  document.querySelectorAll('.bulk-apply-btn').forEach(b => b.disabled = n === 0);
-}
-
-export function initBulkMode() {
-  document.getElementById('btn-bulk-mode').addEventListener('click', () => {
-    if (_bulkMode) exitBulkMode(); else enterBulkMode();
-  });
-  document.querySelectorAll('.bulk-apply-btn').forEach(btn => {
-    btn.addEventListener('click', () => applyBulkMastery(btn.dataset.mastery || null));
-  });
-}
+document.addEventListener('mastery-changed', e => {
+  const card = document.querySelector(`.song-card[data-id="${CSS.escape(e.detail.id)}"]`);
+  if (card) applyMasteryToCard(card, e.detail.mastery);
+});
 
 // ── Artists dropdown ─────────────────────────────────────────────────
 
@@ -337,7 +400,26 @@ export async function loadArtists() {
 
 // ── Static listeners (registered once via initLibrary) ───────────────
 
+let _hoverCard = null;
+
+function initQuickKeys() {
+  const grid = document.getElementById('song-grid');
+  grid.addEventListener('mouseover', e => { _hoverCard = e.target.closest('.song-card'); });
+  grid.addEventListener('mouseleave', () => { _hoverCard = null; });
+  document.addEventListener('keydown', e => {
+    const mastery = KEY_TO_STATUS[e.code];
+    if (!mastery || state.view !== 'library' || !_hoverCard?.isConnected) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.target.matches?.('input, textarea, select')) return;
+    if (document.querySelector('.modal:not(.hidden), .app-dialog, .fav-picker-modal')) return;
+    e.preventDefault();
+    setCardStatus(_hoverCard, mastery);
+  });
+}
+
 export function initLibrary() {
+  initQuickKeys();
+  document.getElementById('btn-import-list').addEventListener('click', openImportDialog);
   let searchTimer;
   document.getElementById('search-input').addEventListener('input', e => {
     clearTimeout(searchTimer);

@@ -2,35 +2,27 @@
 // Bootstraps the application: wires up navigation and initialises
 // all feature modules. No business logic lives here.
 
-import { state }                    from './state.js';
 import { initAuth, logout }         from './auth.js';
 import { initYouTube }              from './youtube.js';
 import { initCalibration }          from './calibration.js';
 import { initTyping }               from './typing.js';
 import { initGame }                 from './game.js';
-import { initLibrary, loadLibrary, initLibraryPlaylists, initBulkMode } from './library.js';
-import { initProfile, loadProfile }              from './profile.js';
-import { initEmission, renderEmissionBoard }     from './emission.js';
+import { initLibrary, initLibraryPlaylists } from './library.js';
+import { initProfile }                           from './profile.js';
+import { initEmission }                          from './emission.js';
 import { initHome, loadHome }                    from './home.js';
+import { initSparkles }                          from './sparkles.js';
+import { showView, initShortcuts }               from './nav.js';
 
 // ── Navigation ────────────────────────────────────────────────────
 
 document.querySelectorAll('.nav-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    const v = btn.dataset.view;
-    document.querySelectorAll('.view').forEach(s => s.classList.remove('active'));
-    document.getElementById('view-' + v).classList.add('active');
-    state.view = v;
-    if (v === 'home')    loadHome();
-    if (v === 'library') loadLibrary();
-    if (v === 'profile') loadProfile();
-    if (v === 'emission') renderEmissionBoard();
-  });
+  btn.addEventListener('click', () => showView(btn.dataset.view));
 });
 
 document.getElementById('btn-logout').addEventListener('click', logout);
+
+initSparkles();
 
 // ── Bootstrap (after successful auth check) ───────────────────────
 
@@ -46,7 +38,7 @@ initAuth(user => {
   initEmission(user);  // emission pick modal close buttons
   initHome(user);      // home action cards, quick play
   initLibraryPlaylists(); // playlist panel in library
-  initBulkMode();         // bulk mastery tagging toolbar
+  initShortcuts();        // ←/→ switch pages, Escape closes overlays
 
   loadHome();          // initial home view
 });

@@ -27,16 +27,18 @@ try {
   process.exit(1);
 }
 
-const VALID_MASTERY = ['prevue', 'revision', 'maitrisee'];
+const VALID_MASTERY = ['prevue', 'revision', 'maitrisee', 'non_maitrisee'];
 
 // Add karaoke_url to songs table if it doesn't exist yet
 try { db.exec(`ALTER TABLE songs ADD COLUMN karaoke_url TEXT`); } catch(_) {}
 try { db.exec(`ALTER TABLE songs ADD COLUMN chosen_count INTEGER DEFAULT 0`); } catch(_) {}
 try { db.exec(`ALTER TABLE songs ADD COLUMN not_chosen_count INTEGER DEFAULT 0`); } catch(_) {}
+try { db.exec(`ALTER TABLE songs ADD COLUMN aired_12m INTEGER DEFAULT 0`); } catch(_) {}
 
 // Profile fields
 try { db.exec(`ALTER TABLE users ADD COLUMN bio TEXT`); } catch(_) {}
 try { db.exec(`ALTER TABLE users ADD COLUMN avatar_url TEXT`); } catch(_) {}
+try { db.exec(`ALTER TABLE users ADD COLUMN favorite_songs_json TEXT`); } catch(_) {}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
@@ -44,6 +46,32 @@ db.exec(`
     user_id   INTEGER NOT NULL,
     song_id   TEXT,
     played_at TEXT NOT NULL DEFAULT (date('now')),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+  CREATE TABLE IF NOT EXISTS activity_log (
+    user_id INTEGER NOT NULL,
+    day     TEXT NOT NULL,
+    kind    TEXT NOT NULL,
+    count   INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (user_id, day, kind),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+  CREATE TABLE IF NOT EXISTS daily_challenges (
+    user_id   INTEGER NOT NULL,
+    day       TEXT NOT NULL,
+    song_id   TEXT NOT NULL,
+    completed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, day),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+  CREATE TABLE IF NOT EXISTS emissions (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id   INTEGER NOT NULL,
+    played_at TEXT NOT NULL DEFAULT (datetime('now')),
+    source    TEXT,
+    mode      TEXT,
+    score     INTEGER,
+    opp_score INTEGER,
     FOREIGN KEY(user_id) REFERENCES users(id)
   );
   CREATE TABLE IF NOT EXISTS playlists (
@@ -146,7 +174,9 @@ app.use(session({
     sameSite: 'strict',
   },
 }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: res => res.setHeader('Cache-Control', 'no-cache'),
+}));
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
 
@@ -158,8 +188,13 @@ function requireAuth(req, res, next) {
 app.get('/api/auth/me', (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Non authentifié' });
   // Generate a CSRF token on first load (handles sessions created before this feature was added).
+  const user = db.prepare(`SELECT id, username, avatar_url FROM users WHERE id = ?`).get(req.session.userId);
+  if (!user) {
+    req.session.destroy(() => res.status(401).json({ error: 'Non authentifié' }));
+    return;
+  }
   if (!req.session.csrfToken) req.session.csrfToken = crypto.randomBytes(32).toString('hex');
-  res.json({ id: req.session.userId, username: req.session.username, csrfToken: req.session.csrfToken });
+  res.json({ ...user, csrfToken: req.session.csrfToken });
 });
 
 app.post('/api/auth/register', async (req, res) => {
@@ -195,7 +230,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
   req.session.userId    = user.id;
   req.session.username  = user.username;
   req.session.csrfToken = crypto.randomBytes(32).toString('hex');
-  res.json({ ok: true, user: { id: user.id, username: user.username }, csrfToken: req.session.csrfToken });
+  res.json({ ok: true, user: { id: user.id, username: user.username, avatar_url: user.avatar_url }, csrfToken: req.session.csrfToken });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -222,14 +257,31 @@ app.use('/api', (req, res, next) => {
 // orders by raw code point). NFD decomposition splits accented letters into
 // base char + combining mark, which we then strip.
 db.function('unaccent', { deterministic: true }, (s) =>
-  s == null ? s : s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+  s == null ? s : s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[’‘`´]/g, "'").toLowerCase()
 );
+const unaccentJs = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[’‘`´]/g, "'").toLowerCase();
 
 const UA_ARTIST = 'unaccent(s.artist)';
 const UA_TITLE  = 'unaccent(s.title)';
 const DEFAULT_ORDER = `${UA_ARTIST}, ${UA_TITLE}`;
 
+function refreshAired12m() {
+  const cutoff = db.prepare(`SELECT date('now','localtime','-365 days') AS d`).get().d;
+  const rows = db.prepare(`SELECT id, show_dates_json FROM songs`).all();
+  const upd  = db.prepare(`UPDATE songs SET aired_12m = ? WHERE id = ?`);
+  db.transaction(() => {
+    for (const r of rows) {
+      let n = 0;
+      try { n = (JSON.parse(r.show_dates_json) || []).filter(d => d >= cutoff).length; } catch (_) {}
+      upd.run(n, r.id);
+    }
+  })();
+}
+refreshAired12m();
+setInterval(refreshAired12m, 12 * 3600 * 1000).unref();
+
 const SORT_MAP = {
+  aired_desc:      `s.aired_12m DESC, ${DEFAULT_ORDER}`,
   z_a:             `${UA_ARTIST} DESC, ${UA_TITLE} DESC`,
   word_count_asc:  `s.word_count ASC NULLS LAST, ${DEFAULT_ORDER}`,
   word_count_desc: `s.word_count DESC NULLS LAST, ${DEFAULT_ORDER}`,
@@ -237,7 +289,7 @@ const SORT_MAP = {
   fn_count_desc:   `s.fn_count DESC NULLS LAST, ${DEFAULT_ORDER}`,
   show_count_desc: `s.show_count DESC NULLS LAST, ${DEFAULT_ORDER}`,
   year_asc:        `s.year ASC NULLS LAST, ${DEFAULT_ORDER}`,
-  mal_aimees:      `CASE WHEN s.chosen_count + s.not_chosen_count = 0 THEN NULL ELSE CAST(s.chosen_count AS REAL) / (s.chosen_count + s.not_chosen_count) END ASC NULLS LAST, ${DEFAULT_ORDER}`,
+  mal_aimees:      `CASE WHEN s.chosen_count + s.not_chosen_count = 0 THEN NULL ELSE CAST(s.chosen_count AS REAL) / (s.chosen_count + s.not_chosen_count) END ASC NULLS LAST, (s.chosen_count + s.not_chosen_count) DESC, ${DEFAULT_ORDER}`,
 };
 
 app.get('/api/songs', (req, res) => {
@@ -249,8 +301,10 @@ app.get('/api/songs', (req, res) => {
   const params = [uid];
 
   if (search) {
-    where += ` AND (s.title LIKE ? OR s.artist LIKE ?)`;
-    params.push(`%${search}%`, `%${search}%`);
+    // Case- and accent-insensitive: "a toi" finds "À toi"
+    const term = `%${unaccentJs(search.trim())}%`;
+    where += ` AND (${UA_TITLE} LIKE ? OR ${UA_ARTIST} LIKE ?)`;
+    params.push(term, term);
   }
   if (artist) {
     where += ` AND s.artist = ?`;
@@ -262,6 +316,10 @@ app.get('/api/songs', (req, res) => {
     where += ` AND s.fn_count > 0`;
   } else if (type === 'none') {
     where += ` AND (s.mc_count = 0 OR s.mc_count IS NULL) AND (s.fn_count = 0 OR s.fn_count IS NULL)`;
+  } else if (type === 'mal_aimees') {
+    where += ` AND (s.chosen_count + s.not_chosen_count) > 0`;
+  } else if (type === 'year_todo') {
+    where += ` AND s.aired_12m > 0 AND (p.mastery IS NULL OR p.mastery != 'maitrisee')`;
   }
   if (mastery === 'non_maitrisee') {
     where += ` AND (p.mastery = 'non_maitrisee' OR p.mastery IS NULL)`;
@@ -273,67 +331,79 @@ app.get('/api/songs', (req, res) => {
     where += ` AND s.id IN (SELECT song_id FROM playlist_songs WHERE playlist_id = ?)`;
     params.push(playlistId);
   }
-
-  const orderBy = SORT_MAP[sort] || 's.artist, s.title';
+  // "Mal aimées" ranks by pick rate unless another sort was chosen explicitly
+  const sortBy  = sort || (type === 'mal_aimees' ? 'mal_aimees' : type === 'year_todo' ? 'aired_desc' : '');
+  const orderBy = SORT_MAP[sortBy] || 's.artist, s.title';
   const inSelectedExpr = playlistId
     ? `(SELECT COUNT(*) FROM playlist_songs WHERE playlist_id = ${playlistId} AND song_id = s.id) as in_selected_playlist`
     : `0 as in_selected_playlist`;
 
-  const total = db.prepare(
-    `SELECT COUNT(*) as c FROM songs s LEFT JOIN progress p ON s.id = p.song_id AND p.user_id = ? WHERE ${where}`
-  ).get(...params).c;
-
-  const songs = db.prepare(`
+  // Fetch all matching songs (no SQL LIMIT) so we can group duplicates
+  // before paginating — SQLite is fast enough for ~3000 rows.
+  const allSongs = db.prepare(`
     SELECT s.id, s.title, s.artist, s.year, s.youtube_url, s.word_count, s.show_count,
-           s.mc_count, s.fn_count, s.chosen_count, s.not_chosen_count,
+           s.mc_count, s.fn_count, s.chosen_count, s.not_chosen_count, s.aired_12m,
+           s.lyrics,
            p.attempts, p.best_score, p.last_score, p.last_played,
            p.mastery,
            COALESCE(p.in_playlist, 0) as in_playlist,
-           ${inSelectedExpr}
+           ${inSelectedExpr},
+           EXISTS(SELECT 1 FROM playlist_songs ps JOIN playlists pl ON pl.id = ps.playlist_id
+                  WHERE pl.user_id = ? AND pl.is_default = 1 AND ps.song_id = s.id) as in_default
     FROM songs s
     LEFT JOIN progress p ON s.id = p.song_id AND p.user_id = ?
     WHERE ${where}
-    ORDER BY ${orderBy} LIMIT ? OFFSET ?
-  `).all(...params, parseInt(limit), parseInt(offset));
+    ORDER BY ${orderBy}
+  `).all(uid, ...params);
+
+  // Normalize lyrics to a fingerprint for grouping:
+  // use the first 300 chars of normalized lyrics so minor typos between wiki
+  // pages don't prevent grouping, while still distinguishing different songs.
+  function lyricsKey(lyrics) {
+    const norm = (lyrics || '').toLowerCase().replace(/\s+/g, '').replace(/[^a-z]/g, '').slice(0, 300);
+    if (!norm) return '__empty__';
+    return crypto.createHash('md5').update(norm).digest('hex');
+  }
+
+  // Group by normalised title + lyrics fingerprint — keeps different songs with
+  // the same title (e.g. "Les mots" by Keen'V vs Mylène Farmer) separate.
+  const groups = new Map(); // key → [songs]
+  for (const s of allSongs) {
+    const key = s.title.toLowerCase().trim() + '||' + lyricsKey(s.lyrics);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+
+  const grouped = [];
+  for (const versions of groups.values()) {
+    versions.sort((a, b) => (b.show_count || 0) - (a.show_count || 0));
+    const { lyrics: _l, ...primary } = versions[0];
+    if (versions.length > 1) {
+      primary.alt_versions = versions.slice(1).map(v => ({
+        id: v.id, artist: v.artist, year: v.year, show_count: v.show_count,
+      }));
+    }
+    grouped.push(primary);
+  }
+
+  // Re-sort grouped results (grouping disrupts order for multi-version songs)
+  const sortKey = sortBy && SORT_MAP[sortBy];
+  if (!sortKey || sortKey.startsWith('unaccent')) {
+    const dir = sortBy === 'z_a' ? -1 : 1;
+    grouped.sort((a, b) => dir * (
+      (a.artist || '').localeCompare(b.artist || '', 'fr') || (a.title || '').localeCompare(b.title || '', 'fr')
+    ));
+  }
+
+  const total = grouped.length;
+  const lim   = parseInt(limit);
+  const off   = parseInt(offset);
+  const songs = grouped.slice(off, off + lim);
 
   res.json({ songs, total });
 });
 
 // GET home data (stats + recents + playlist)
-app.get('/api/home', (req, res) => {
-  const uid = req.session.userId;
-
-  const stats = db.prepare(`
-    SELECT
-      COUNT(CASE WHEN p.mastery = 'maitrisee'     THEN 1 END) as mastered,
-      COUNT(CASE WHEN p.mastery = 'revision'      THEN 1 END) as in_revision,
-      COUNT(CASE WHEN p.mastery = 'prevue'        THEN 1 END) as prevue,
-      COUNT(CASE WHEN p.in_playlist = 1           THEN 1 END) as in_playlist,
-      MAX(p.best_score) as best_score,
-      COUNT(CASE WHEN p.attempts > 0              THEN 1 END) as played
-    FROM progress p WHERE p.user_id = ?
-  `).get(uid) || {};
-
-  const recents = db.prepare(`
-    SELECT s.id, s.title, s.artist, p.last_played, p.best_score, p.last_score
-    FROM progress p JOIN songs s ON s.id = p.song_id
-    WHERE p.user_id = ? AND p.last_played IS NOT NULL
-    ORDER BY p.last_played DESC LIMIT 5
-  `).all(uid);
-
-  const playlist = db.prepare(`
-    SELECT s.id, s.title, s.artist
-    FROM progress p JOIN songs s ON s.id = p.song_id
-    WHERE p.user_id = ? AND p.in_playlist = 1
-    ORDER BY s.artist, s.title LIMIT 8
-  `).all(uid);
-
-  const totalPlaylist = db.prepare(
-    `SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND in_playlist = 1`
-  ).get(uid).c;
-
-  res.json({ stats, recents, playlist, totalPlaylist });
-});
 
 // GET distinct artists
 app.get('/api/artists', (req, res) => {
@@ -373,6 +443,12 @@ app.post('/api/songs/:id/attempt', (req, res) => {
     `).run(uid, songId, score, score);
   }
   db.prepare(`INSERT INTO sessions (user_id, song_id, played_at) VALUES (?, ?, date('now','localtime'))`).run(uid, songId);
+  if (Number(score) >= CHALLENGE_PASS) {
+    db.prepare(`
+      UPDATE daily_challenges SET completed = 1
+      WHERE user_id = ? AND day = date('now','localtime') AND song_id = ?
+    `).run(uid, songId);
+  }
   res.json({ ok: true });
 });
 
@@ -403,19 +479,89 @@ app.get('/api/songs/:id/playlists', (req, res) => {
   res.json(rows);
 });
 
-// PUT set mastery manually
+// ── Mastery ──────────────────────────────────────────────────────────
+// "non_maitrisee" clears the status but keeps the rest of the progress row
+// (attempts, best score, calibrated timestamps).
+const stmtSongExists  = db.prepare(`SELECT 1 FROM songs WHERE id = ?`);
+const stmtGetMastery  = db.prepare(`SELECT mastery FROM progress WHERE song_id = ? AND user_id = ?`);
+const stmtSetMastery  = db.prepare(`UPDATE progress SET mastery = ? WHERE song_id = ? AND user_id = ?`);
+const stmtNewProgress = db.prepare(`INSERT INTO progress (user_id, song_id, mastery) VALUES (?, ?, ?)`);
+const stmtLogLearned  = db.prepare(`
+  INSERT INTO activity_log (user_id, day, kind, count) VALUES (?, date('now','localtime'), 'learned', ?)
+  ON CONFLICT(user_id, day, kind) DO UPDATE SET count = count + excluded.count
+`);
+
+// Returns true when the song becomes "apprise" (for the activity streak)
+function setMastery(uid, songId, mastery) {
+  const value = mastery === 'non_maitrisee' ? null : mastery;
+  const row = stmtGetMastery.get(songId, uid);
+  if (row) stmtSetMastery.run(value, songId, uid);
+  else if (value) stmtNewProgress.run(uid, songId, value);
+  return value === 'maitrisee' && row?.mastery !== 'maitrisee';
+}
+
 app.put('/api/songs/:id/mastery', (req, res) => {
   const { mastery } = req.body;
-  const songId = req.params.id;
-  const uid    = req.session.userId;
+  const uid = req.session.userId;
   if (!VALID_MASTERY.includes(mastery)) return res.status(400).json({ error: 'Invalid mastery value' });
-  const existing = db.prepare(`SELECT song_id FROM progress WHERE song_id = ? AND user_id = ?`).get(songId, uid);
-  if (existing) {
-    db.prepare(`UPDATE progress SET mastery = ? WHERE song_id = ? AND user_id = ?`).run(mastery, songId, uid);
-  } else {
-    db.prepare(`INSERT INTO progress (user_id, song_id, mastery) VALUES (?, ?, ?)`).run(uid, songId, mastery);
-  }
+  if (!stmtSongExists.get(req.params.id)) return res.status(404).json({ error: 'Chanson introuvable' });
+  if (setMastery(uid, req.params.id, mastery)) stmtLogLearned.run(uid, 1);
   res.json({ ok: true });
+});
+
+// PUT one status for many songs (list import)
+app.put('/api/mastery/bulk', (req, res) => {
+  const { ids, mastery } = req.body || {};
+  const uid = req.session.userId;
+  if (!VALID_MASTERY.includes(mastery)) return res.status(400).json({ error: 'Invalid mastery value' });
+  if (!Array.isArray(ids) || !ids.length || ids.length > 3000 || ids.some(id => typeof id !== 'string')) {
+    return res.status(400).json({ error: 'ids invalides' });
+  }
+  const known = [...new Set(ids)].filter(id => stmtSongExists.get(id));
+  const learned = db.transaction(() => known.reduce((n, id) => n + (setMastery(uid, id, mastery) ? 1 : 0), 0))();
+  if (learned) stmtLogLearned.run(uid, learned);
+  res.json({ ok: true, updated: known.length });
+});
+
+// POST match free-text lines ("Titre", "Artiste - Titre", "Titre (Artiste)")
+// against the catalogue. Returns candidates best-first per line.
+const stmtTitleExact = db.prepare(`
+  SELECT id, title, artist, year, show_count FROM songs WHERE unaccent(title) = ? ORDER BY show_count DESC NULLS LAST LIMIT 6`);
+const stmtTitleLike = db.prepare(`
+  SELECT id, title, artist, year, show_count FROM songs WHERE unaccent(title) LIKE ? ORDER BY show_count DESC NULLS LAST LIMIT 6`);
+
+function matchLine(line) {
+  const clean = line.replace(/^\s*(?:[-*•·]|\d+[.)])\s*/, '').trim();
+  let parts;
+  const paren = clean.match(/^(.*?)\s*\(([^()]+)\)\s*$/);
+  if (paren) parts = [paren[1], paren[2]];
+  else parts = clean.split(/\s+[-–—|]\s+/);
+  parts = parts.map(p => unaccentJs(p.trim())).filter(Boolean);
+
+  const scored = new Map();
+  const add = (row, score) => {
+    const prev = scored.get(row.id);
+    if (!prev || prev.score < score) scored.set(row.id, { ...row, score });
+  };
+  parts.forEach((part, i) => {
+    const hint = parts.filter((_, j) => j !== i).join(' ');
+    const artistOk = row => hint && (unaccentJs(row.artist).includes(hint) || hint.includes(unaccentJs(row.artist)));
+    for (const row of stmtTitleExact.all(part)) add(row, artistOk(row) ? 4 : hint ? 2 : 3);
+    if (part.length >= 3) {
+      for (const row of stmtTitleLike.all(`%${part}%`)) add(row, artistOk(row) ? 2.5 : 1);
+    }
+  });
+  const candidates = [...scored.values()]
+    .sort((a, b) => b.score - a.score || (b.show_count || 0) - (a.show_count || 0))
+    .slice(0, 5)
+    .map(({ id, title, artist, year, score }) => ({ id, title, artist, year, score }));
+  return { line, candidates };
+}
+
+app.post('/api/songs/match', (req, res) => {
+  const lines = Array.isArray(req.body?.lines) ? req.body.lines : [];
+  const clean = lines.map(l => String(l).trim()).filter(Boolean).slice(0, 1000);
+  res.json(clean.map(matchLine));
 });
 
 // PUT toggle playlist
@@ -483,41 +629,102 @@ app.get('/api/stats', (req, res) => {
 
 app.get('/api/profile', (req, res) => {
   const uid = req.session.userId;
-  const user = db.prepare(`SELECT id, username, bio, avatar_url FROM users WHERE id = ?`).get(uid);
+  const user = db.prepare(`SELECT id, username, bio, avatar_url, favorite_songs_json FROM users WHERE id = ?`).get(uid);
   const played     = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND attempts > 0`).get(uid).c;
   const maitrisee  = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'maitrisee'`).get(uid).c;
   const revision   = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'revision'`).get(uid).c;
   const prevue     = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'prevue'`).get(uid).c;
   // Distinct days with a session → rough emission count (2 per day on average)
-  const emissionsRow = db.prepare(`SELECT COUNT(DISTINCT played_at) as c FROM sessions WHERE user_id = ?`).get(uid);
-  const emissions  = emissionsRow.c;
+  const emissions  = db.prepare(`SELECT COUNT(*) as c FROM emissions WHERE user_id = ?`).get(uid).c;
   // Average best_score across all played songs (as % success rate)
   const avgRow = db.prepare(`SELECT ROUND(AVG(best_score)) as avg FROM progress WHERE user_id = ? AND attempts > 0`).get(uid);
   const successRate = avgRow.avg ?? 0;
   const total_songs = db.prepare(`SELECT COUNT(*) as c FROM songs`).get().c;
   const non_maitrisee = Math.max(0, total_songs - maitrisee - revision - prevue);
+
+  // Mastery breakdown by song type (MC / FN / other)
+  const masteryByType = db.prepare(`
+    SELECT
+      CASE
+        WHEN s.mc_enabled = 1 AND s.fn_enabled = 1 THEN 'both'
+        WHEN s.mc_enabled = 1 THEN 'mc'
+        WHEN s.fn_enabled = 1 THEN 'fn'
+        ELSE 'other'
+      END as stype,
+      COALESCE(p.mastery, 'non_maitrisee') as mastery,
+      COUNT(*) as c
+    FROM songs s LEFT JOIN progress p ON s.id = p.song_id AND p.user_id = ?
+    GROUP BY stype, mastery
+  `).all(uid);
+
+  const byType = { mc: {}, fn: {}, other: {} };
+  const totals = { mc: 0, fn: 0, other: 0 };
+  for (const row of masteryByType) {
+    const types = row.stype === 'both' ? ['mc', 'fn'] : [row.stype === 'other' ? 'other' : row.stype];
+    for (const t of types) {
+      byType[t][row.mastery] = (byType[t][row.mastery] || 0) + row.c;
+      totals[t] += row.c;
+    }
+  }
+
+  // Top artists by number of songs with any mastery tag
   const topArtists = db.prepare(`
-    SELECT s.artist, COUNT(*) as plays
-    FROM sessions se JOIN songs s ON s.id = se.song_id
-    WHERE se.user_id = ?
-    GROUP BY s.artist ORDER BY plays DESC LIMIT 5
+    SELECT s.artist, COUNT(*) as tagged
+    FROM progress p JOIN songs s ON s.id = p.song_id
+    WHERE p.user_id = ? AND p.mastery IS NOT NULL
+    GROUP BY s.artist ORDER BY tagged DESC LIMIT 5
   `).all(uid);
-  const topSongs = db.prepare(`
-    SELECT s.title, s.artist, COUNT(*) as plays
-    FROM sessions se JOIN songs s ON s.id = se.song_id
-    WHERE se.user_id = ?
-    GROUP BY se.song_id ORDER BY plays DESC LIMIT 5
-  `).all(uid);
-  res.json({ user, played, total_songs, maitrisee, revision, prevue, non_maitrisee, emissions, successRate, topArtists, topSongs });
+
+  // Favorites: user-curated list stored as JSON
+  const favJson = user.favorite_songs_json;
+  const favIds = favJson ? JSON.parse(favJson) : [];
+  const favSongs = favIds.length
+    ? db.prepare(`SELECT id, title, artist FROM songs WHERE id IN (${favIds.map(() => '?').join(',')})`)
+        .all(...favIds)
+        .sort((a, b) => favIds.indexOf(a.id) - favIds.indexOf(b.id))
+    : [];
+
+  res.json({ user, played, total_songs, maitrisee, revision, prevue, non_maitrisee, emissions, successRate,
+             byType, totals, topArtists, favSongs });
+});
+
+app.put('/api/profile/favorites', (req, res) => {
+  const uid = req.session.userId;
+  if (!uid) return res.status(401).json({ error: 'Non authentifié' });
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || ids.length > 5) return res.status(400).json({ error: 'ids invalides' });
+  db.prepare(`UPDATE users SET favorite_songs_json = ? WHERE id = ?`).run(JSON.stringify(ids), uid);
+  res.json({ ok: true });
 });
 
 app.get('/api/revision-queue', (req, res) => {
   const uid = req.session.userId;
   if (!uid) return res.status(401).json({ error: 'Non connecté' });
-  const { mastery, count = 5, mc } = req.query;
+  const { mastery, count = 5, mc, source, id } = req.query;
   const n = Math.min(Math.max(1, parseInt(count) || 5), 50);
   let songs;
-  if (mc === '1') {
+  if (source === 'queue') {
+    songs = db.prepare(`
+      SELECT s.id, s.title, s.artist, s.year
+      FROM songs s JOIN progress p ON p.song_id = s.id AND p.user_id = ?
+      WHERE p.mastery IN ('revision','prevue')
+      ORDER BY (p.mastery = 'revision') DESC, p.last_played IS NOT NULL, p.last_played ASC
+      LIMIT ?`).all(uid, n);
+  } else if (source === 'playlist') {
+    songs = db.prepare(`
+      SELECT s.id, s.title, s.artist, s.year
+      FROM playlist_songs ps
+      JOIN playlists pl ON pl.id = ps.playlist_id
+      JOIN songs s ON s.id = ps.song_id
+      WHERE pl.id = ? AND pl.user_id = ?
+      ORDER BY RANDOM() LIMIT ?`).all(parseInt(id) || 0, uid, n);
+  } else if (source === 'year_todo') {
+    songs = db.prepare(`
+      SELECT s.id, s.title, s.artist, s.year
+      FROM songs s LEFT JOIN progress p ON p.song_id = s.id AND p.user_id = ?
+      WHERE s.aired_12m > 0 AND (p.mastery IS NULL OR p.mastery != 'maitrisee')
+      ORDER BY s.aired_12m DESC, RANDOM() LIMIT ?`).all(uid, n);
+  } else if (mc === '1' || source === 'mc') {
     songs = db.prepare(`
       SELECT s.id, s.title, s.artist, s.year
       FROM songs s WHERE s.mc_count > 0
@@ -566,49 +773,228 @@ app.post('/api/profile/avatar', (req, res) => {
   }
   const filename = `${uid}.${ext}`;
   fs.writeFileSync(path.join(AVATARS_DIR, filename), Buffer.from(data, 'base64'));
-  const avatar_url = `/avatars/${filename}`;
+  const avatar_url = `/avatars/${filename}?v=${Date.now()}`;
   db.prepare(`UPDATE users SET avatar_url = ? WHERE id = ?`).run(avatar_url, uid);
   res.json({ ok: true, avatar_url });
 });
 
+// 'YYYY-MM-DD' arithmetic at UTC noon so DST never shifts the day
+function shiftDay(day, n) {
+  const d = new Date(day + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+// A day counts as active if a song was played (revision or emission round)
+// or a song was marked as learned. A streak stays alive until the end of the
+// day: without activity yet today, it counts up to yesterday ("at risk").
+function activityStats(uid) {
+  const days = db.prepare(`
+    SELECT date, SUM(plays) as plays, SUM(learned) as learned FROM (
+      SELECT played_at as date, COUNT(*) as plays, 0 as learned
+      FROM sessions WHERE user_id = ? GROUP BY played_at
+      UNION ALL
+      SELECT day as date, 0 as plays, count as learned
+      FROM activity_log WHERE user_id = ? AND kind = 'learned'
+    ) GROUP BY date ORDER BY date DESC
+  `).all(uid, uid);
+  const today = db.prepare(`SELECT date('now','localtime') as d`).get().d;
+  const activeToday = days[0]?.date === today;
+
+  let streak = 0;
+  let check = activeToday ? today : shiftDay(today, -1);
+  for (const { date } of days) {
+    if (date > check) continue;
+    if (date !== check) break;
+    streak++;
+    check = shiftDay(check, -1);
+  }
+
+  let maxStreak = 0, cur = 0, prev = null;
+  for (const { date } of [...days].reverse()) {
+    cur = prev && shiftDay(prev, 1) === date ? cur + 1 : 1;
+    maxStreak = Math.max(maxStreak, cur);
+    prev = date;
+  }
+
+  const todayRow = activeToday ? days[0] : { plays: 0, learned: 0 };
+  return {
+    today, days, streak, maxStreak, totalActiveDays: days.length,
+    streakAtRisk: streak > 0 && !activeToday,
+    todayCount: (todayRow.plays || 0) + (todayRow.learned || 0),
+  };
+}
+
 app.get('/api/profile/activity', (req, res) => {
   const uid = req.session.userId;
   if (!uid) return res.status(401).json({ error: 'Non connecté' });
+  const a = activityStats(uid);
+  res.json({ today: a.today, days: a.days.slice(0, 60), streak: a.streak, maxStreak: a.maxStreak,
+             totalActiveDays: a.totalActiveDays, streakAtRisk: a.streakAtRisk });
+});
 
-  const activity = db.prepare(`
-    SELECT played_at as date, COUNT(*) as count
-    FROM sessions WHERE user_id = ?
-    AND played_at >= date('now', 'localtime', '-364 days')
-    GROUP BY played_at ORDER BY played_at
+// ── Gamification: challenge, XP / levels, badges ───────────────────────
+const CHALLENGE_PASS = 50;      // % needed on the daily challenge song
+const CHALLENGE_XP   = 50;
+const DAILY_GOAL     = 3;       // songs played or learned per day
+
+// Today's challenge is picked once and stored, so it stays put all day.
+function dailyChallenge(uid) {
+  let row = db.prepare(`SELECT song_id, completed FROM daily_challenges WHERE user_id = ? AND day = date('now','localtime')`).get(uid);
+  if (!row) {
+    const pool = db.prepare(`
+      SELECT s.id FROM songs s
+      LEFT JOIN progress p ON p.song_id = s.id AND p.user_id = ?
+      WHERE s.aired_12m > 0 AND (p.mastery IS NULL OR p.mastery != 'maitrisee')
+        AND s.id NOT IN (SELECT song_id FROM daily_challenges WHERE user_id = ? AND day >= date('now','localtime','-14 days'))
+      ORDER BY s.aired_12m DESC LIMIT 40
+    `).all(uid, uid);
+    if (!pool.length) return null;
+    const pick = pool[Math.floor(Math.random() * pool.length)].id;
+    db.prepare(`INSERT INTO daily_challenges (user_id, day, song_id) VALUES (?, date('now','localtime'), ?)`).run(uid, pick);
+    row = { song_id: pick, completed: 0 };
+  }
+  const song = db.prepare(`SELECT id, title, artist, year, aired_12m FROM songs WHERE id = ?`).get(row.song_id);
+  return song && { ...song, completed: !!row.completed, xp: CHALLENGE_XP, pass: CHALLENGE_PASS };
+}
+
+// Level L starts at 50·L·(L−1) XP: 100, 300, 600, 1000, 1500…
+const xpForLevel = L => 50 * L * (L - 1);
+const LEVEL_TITLES = [
+  [25, 'Légende du plateau'], [18, 'Maestro'], [14, 'Maestro en herbe'], [10, 'Soliste'],
+  [7, 'Choriste confirmé'], [5, 'Choriste'], [3, 'Chanteur sous la douche'], [1, 'Débutant'],
+];
+
+function levelFromXp(xp) {
+  let level = 1;
+  while (xpForLevel(level + 1) <= xp) level++;
+  return {
+    level, xp,
+    title: LEVEL_TITLES.find(([min]) => level >= min)[1],
+    levelStart: xpForLevel(level),
+    nextLevel: xpForLevel(level + 1),
+  };
+}
+
+const BADGES = [
+  { id: 'learn_1',      label: 'Premiers pas',        icon: '1',   tier: 'green',  stat: 'learned',     goal: 1,    desc: 'Apprendre une chanson' },
+  { id: 'learn_50',     label: '50 apprises',         icon: '50',  tier: 'green',  stat: 'learned',     goal: 50,   desc: 'Apprendre 50 chansons' },
+  { id: 'learn_100',    label: '100 apprises',        icon: '100', tier: 'green',  stat: 'learned',     goal: 100,  desc: 'Apprendre 100 chansons' },
+  { id: 'learn_250',    label: '250 apprises',        icon: '250', tier: 'green',  stat: 'learned',     goal: 250,  desc: 'Apprendre 250 chansons' },
+  { id: 'learn_500',    label: '500 apprises',        icon: '500', tier: 'green',  stat: 'learned',     goal: 500,  desc: 'Apprendre 500 chansons' },
+  { id: 'learn_1000',   label: '1 000 apprises',      icon: '1K',  tier: 'green',  stat: 'learned',     goal: 1000, desc: 'Apprendre 1 000 chansons' },
+  { id: 'mc_25',        label: 'Même chanson',        icon: 'MC',  tier: 'blue',   stat: 'mcLearned',   goal: 25,   desc: 'Apprendre 25 chansons « Même chanson »' },
+  { id: 'mc_100',       label: 'Pilier du MC',        icon: 'MC',  tier: 'blue',   stat: 'mcLearned',   goal: 100,  desc: 'Apprendre 100 chansons « Même chanson »' },
+  { id: 'fn_50',        label: 'Finaliste',           icon: 'FN',  tier: 'blue',   stat: 'fnLearned',   goal: 50,   desc: 'Apprendre 50 chansons de finale' },
+  { id: 'perfect',      label: 'Sans faute',          icon: '100%',tier: 'gold',   stat: 'perfect',     goal: 1,    desc: 'Obtenir 100 % sur une chanson' },
+  { id: 'streak_3',     label: 'Sur la lancée',       icon: '3j',  tier: 'orange', stat: 'maxStreak',   goal: 3,    desc: '3 jours d\u2019activité de suite' },
+  { id: 'streak_7',     label: 'Une semaine',         icon: '7j',  tier: 'orange', stat: 'maxStreak',   goal: 7,    desc: '7 jours d\u2019activité de suite' },
+  { id: 'streak_30',    label: 'Inarrêtable',         icon: '30j', tier: 'orange', stat: 'maxStreak',   goal: 30,   desc: '30 jours d\u2019activité de suite' },
+  { id: 'challenge_1',  label: 'Défi relevé',         icon: '★',   tier: 'gold',   stat: 'challenges',  goal: 1,    desc: 'Réussir un défi du jour' },
+  { id: 'challenge_10', label: 'Collectionneur',      icon: '★10', tier: 'gold',   stat: 'challenges',  goal: 10,   desc: 'Réussir 10 défis du jour' },
+  { id: 'emission_1',   label: 'En plateau',          icon: 'TV',  tier: 'blue',   stat: 'emissions',   goal: 1,    desc: 'Terminer une émission' },
+  { id: 'emission_10',  label: 'Habitué du plateau',  icon: 'TV',  tier: 'blue',   stat: 'emissions',   goal: 10,   desc: 'Terminer 10 émissions' },
+  { id: 'coverage_25',  label: 'Prêt pour le plateau',icon: '25%', tier: 'gold',   stat: 'coveragePct', goal: 25,   desc: 'Connaître 25 % du répertoire de l\u2019année' },
+];
+
+function gamification(uid, activity) {
+  const c = db.prepare(`
+    SELECT
+      COUNT(CASE WHEN p.mastery = 'maitrisee' THEN 1 END)                     AS learned,
+      COUNT(CASE WHEN p.mastery = 'maitrisee' AND s.mc_count > 0 THEN 1 END)  AS mcLearned,
+      COUNT(CASE WHEN p.mastery = 'maitrisee' AND s.fn_count > 0 THEN 1 END)  AS fnLearned,
+      COUNT(CASE WHEN p.best_score >= 100 THEN 1 END)                         AS perfect
+    FROM progress p JOIN songs s ON s.id = p.song_id WHERE p.user_id = ?
+  `).get(uid);
+  const plays      = db.prepare(`SELECT COUNT(*) AS n FROM sessions WHERE user_id = ?`).get(uid).n;
+  const challenges = db.prepare(`SELECT COUNT(*) AS n FROM daily_challenges WHERE user_id = ? AND completed = 1`).get(uid).n;
+  const emissions  = db.prepare(`SELECT COUNT(*) AS n FROM emissions WHERE user_id = ?`).get(uid).n;
+  const cov = db.prepare(`
+    SELECT COUNT(*) AS aired, COUNT(CASE WHEN p.mastery = 'maitrisee' THEN 1 END) AS known
+    FROM songs s LEFT JOIN progress p ON p.song_id = s.id AND p.user_id = ?
+    WHERE s.aired_12m > 0
+  `).get(uid);
+  const coveragePct = cov.aired ? Math.round(cov.known / cov.aired * 100) : 0;
+
+  const stats = { ...c, plays, challenges, emissions, coveragePct, maxStreak: activity.maxStreak };
+  const xp = c.learned * 10 + plays * 2 + challenges * CHALLENGE_XP + emissions * 20;
+  const badges = BADGES.map(({ stat, goal, ...b }) => ({
+    ...b, goal, value: Math.min(stats[stat], goal), unlocked: stats[stat] >= goal,
+  }));
+  return { level: levelFromXp(xp), stats, coverage: { ...cov, pct: coveragePct }, badges };
+}
+
+// GET everything the home screen needs in one round trip
+app.get('/api/home', (req, res) => {
+  const uid = req.session.userId;
+  const activity = activityStats(uid);
+  const g = gamification(uid, activity);
+
+  const queueCounts = db.prepare(`
+    SELECT COUNT(CASE WHEN mastery = 'revision' THEN 1 END) AS revision,
+           COUNT(CASE WHEN mastery = 'prevue'   THEN 1 END) AS prevue
+    FROM progress WHERE user_id = ?
+  `).get(uid);
+  const next = db.prepare(`
+    SELECT s.id, s.title, s.artist, s.year, p.mastery, p.last_score, p.last_played
+    FROM progress p JOIN songs s ON s.id = p.song_id
+    WHERE p.user_id = ? AND p.mastery IN ('revision','prevue')
+    ORDER BY (p.mastery = 'revision') DESC, p.last_played IS NOT NULL, p.last_played ASC
+    LIMIT 1
+  `).get(uid) || null;
+
+  const priority = db.prepare(`
+    SELECT s.id, s.title, s.artist, s.aired_12m AS aired
+    FROM songs s LEFT JOIN progress p ON p.song_id = s.id AND p.user_id = ?
+    WHERE s.aired_12m > 0 AND (p.mastery IS NULL OR p.mastery != 'maitrisee')
+    ORDER BY s.aired_12m DESC, ${DEFAULT_ORDER} LIMIT 5
   `).all(uid);
 
-  const allDays = db.prepare(`
-    SELECT DISTINCT played_at as date FROM sessions WHERE user_id = ? ORDER BY played_at DESC
-  `).all(uid).map(r => r.date);
+  ensureDefaultPlaylist(uid);
+  const playlists = db.prepare(`
+    SELECT p.id, p.name, p.is_default, COUNT(ps.song_id) AS count
+    FROM playlists p LEFT JOIN playlist_songs ps ON ps.playlist_id = p.id
+    WHERE p.user_id = ? GROUP BY p.id ORDER BY p.is_default DESC, p.created_at
+  `).all(uid);
+  const mcCount = db.prepare(`SELECT COUNT(*) AS n FROM songs WHERE mc_count > 0`).get().n;
 
-  const today = db.prepare(`SELECT date('now','localtime') as d`).get().d;
-  let streak = 0, check = today;
-  for (const day of allDays) {
-    if (day === check) {
-      streak++;
-      const d = new Date(check); d.setDate(d.getDate() - 1);
-      check = d.toISOString().slice(0, 10);
-    } else break;
+  const recentSongs = db.prepare(`
+    SELECT 'song' AS type, s.id, s.title, s.artist, p.last_score AS score, p.last_played AS at
+    FROM progress p JOIN songs s ON s.id = p.song_id
+    WHERE p.user_id = ? AND p.last_played IS NOT NULL
+    ORDER BY p.last_played DESC LIMIT 4
+  `).all(uid);
+  const recentEmissions = db.prepare(`
+    SELECT 'emission' AS type, source, mode, score, opp_score AS oppScore, played_at AS at
+    FROM emissions WHERE user_id = ? ORDER BY played_at DESC LIMIT 4
+  `).all(uid);
+  const recent = [...recentSongs, ...recentEmissions].sort((a, b) => (a.at < b.at ? 1 : -1)).slice(0, 4);
+
+  res.json({
+    level: g.level,
+    streak: { current: activity.streak, best: activity.maxStreak, atRisk: activity.streakAtRisk,
+              today: activity.todayCount, goal: DAILY_GOAL },
+    queue: { ...queueCounts, total: queueCounts.revision + queueCounts.prevue, next },
+    challenge: dailyChallenge(uid),
+    coverage: { ...g.coverage, priority },
+    playlists,
+    smart: { year_todo: g.coverage.aired - g.coverage.known, mc: mcCount },
+    badges: g.badges,
+    recent,
+  });
+});
+
+// POST a finished emission (score history, badges, XP)
+app.post('/api/emission/complete', (req, res) => {
+  const uid = req.session.userId;
+  const { source, mode, score, oppScore } = req.body || {};
+  const okScore = v => v == null || (Number.isInteger(v) && v >= 0 && v <= 100000);
+  if (!['real', 'episode', 'generated'].includes(source) || !['solo', 'duel'].includes(mode) || !okScore(score) || !okScore(oppScore)) {
+    return res.status(400).json({ error: 'Données invalides' });
   }
-
-  // Max streak over all-time activity
-  const asc = [...allDays].reverse();
-  let maxStreak = 0, cur = 0;
-  for (let i = 0; i < asc.length; i++) {
-    if (i === 0) { cur = 1; }
-    else {
-      const prev = new Date(asc[i - 1]); prev.setDate(prev.getDate() + 1);
-      cur = prev.toISOString().slice(0, 10) === asc[i] ? cur + 1 : 1;
-    }
-    if (cur > maxStreak) maxStreak = cur;
-  }
-
-  res.json({ activity, streak, maxStreak, totalActiveDays: allDays.length });
+  db.prepare(`INSERT INTO emissions (user_id, source, mode, score, opp_score) VALUES (?, ?, ?, ?, ?)`)
+    .run(uid, source, mode, score ?? 0, mode === 'duel' ? (oppScore ?? 0) : null);
+  res.json({ ok: true });
 });
 
 app.get('/api/emission/episodes', (req, res) => {
@@ -1524,5 +1910,12 @@ app.post('/api/emission/generate', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\nNOPLP Revision - http://localhost:${PORT}\n`);
+  console.log(`\nNOPLR - http://localhost:${PORT}\n`);
+});
+
+process.on('uncaughtException', err => {
+  console.error('[uncaughtException]', err);
+});
+process.on('unhandledRejection', err => {
+  console.error('[unhandledRejection]', err);
 });
