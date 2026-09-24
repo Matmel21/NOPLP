@@ -29,6 +29,20 @@ try {
 
 const VALID_MASTERY = ['prevue', 'revision', 'maitrisee', 'non_maitrisee'];
 
+// Enforce REFERENCES clauses (off by default in SQLite) so user data can't
+// point at missing rows and playlist deletion really cascades to its songs.
+db.pragma('foreign_keys = ON');
+
+// Created first: the ALTERs below and every other user table depend on it.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT    NOT NULL UNIQUE,
+    password_hash TEXT    NOT NULL,
+    created_at    TEXT    DEFAULT (datetime('now'))
+  );
+`);
+
 // Add karaoke_url to songs table if it doesn't exist yet
 try { db.exec(`ALTER TABLE songs ADD COLUMN karaoke_url TEXT`); } catch(_) {}
 try { db.exec(`ALTER TABLE songs ADD COLUMN chosen_count INTEGER DEFAULT 0`); } catch(_) {}
@@ -39,13 +53,17 @@ try { db.exec(`ALTER TABLE songs ADD COLUMN aired_12m INTEGER DEFAULT 0`); } cat
 try { db.exec(`ALTER TABLE users ADD COLUMN bio TEXT`); } catch(_) {}
 try { db.exec(`ALTER TABLE users ADD COLUMN avatar_url TEXT`); } catch(_) {}
 try { db.exec(`ALTER TABLE users ADD COLUMN favorite_songs_json TEXT`); } catch(_) {}
+// Public counters, kept on the user row so future leaderboards are one indexed query
+try { db.exec(`ALTER TABLE users ADD COLUMN xp INTEGER NOT NULL DEFAULT 0`); } catch(_) {}
+try { db.exec(`ALTER TABLE users ADD COLUMN bells INTEGER NOT NULL DEFAULT 0`); } catch(_) {}
+try { db.exec(`ALTER TABLE users ADD COLUMN final_winnings INTEGER NOT NULL DEFAULT 0`); } catch(_) {}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id   INTEGER NOT NULL,
     song_id   TEXT,
-    played_at TEXT NOT NULL DEFAULT (date('now')),
+    played_at TEXT NOT NULL DEFAULT (date('now','localtime')),
     FOREIGN KEY(user_id) REFERENCES users(id)
   );
   CREATE TABLE IF NOT EXISTS activity_log (
@@ -92,6 +110,38 @@ db.exec(`
   );
 `);
 
+try { db.exec(`ALTER TABLE emissions ADD COLUMN final_gain INTEGER`); } catch(_) {}
+try { db.exec(`ALTER TABLE emissions ADD COLUMN xp INTEGER NOT NULL DEFAULT 0`); } catch(_) {}
+
+db.exec(`
+  -- XP ledger: every award is one row, users.xp is its running total
+  CREATE TABLE IF NOT EXISTS xp_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    kind       TEXT    NOT NULL,
+    amount     INTEGER NOT NULL,
+    ref        TEXT,
+    day        TEXT    NOT NULL DEFAULT (date('now','localtime')),
+    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+  CREATE TABLE IF NOT EXISTS app_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_xp_events_user_day ON xp_events(user_id, kind, day);
+  CREATE INDEX IF NOT EXISTS idx_sessions_user      ON sessions(user_id, played_at);
+  CREATE INDEX IF NOT EXISTS idx_emissions_user     ON emissions(user_id, played_at);
+  CREATE INDEX IF NOT EXISTS idx_daily_song         ON daily_challenges(user_id, song_id);
+  CREATE INDEX IF NOT EXISTS idx_users_xp           ON users(xp DESC);
+  CREATE INDEX IF NOT EXISTS idx_users_winnings     ON users(final_winnings DESC);
+`);
+// Rows left behind while foreign keys were not enforced
+db.exec(`DELETE FROM playlist_songs WHERE playlist_id NOT IN (SELECT id FROM playlists)`);
+// Usernames are unique regardless of case ("Bob" can't impersonate "bob").
+// Skipped silently if an older database already holds such a pair.
+try { db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_nocase ON users(username COLLATE NOCASE)`); } catch(_) {}
+
 const AVATARS_DIR = path.join(__dirname, 'public', 'avatars');
 if (!fs.existsSync(AVATARS_DIR)) fs.mkdirSync(AVATARS_DIR, { recursive: true });
 
@@ -110,7 +160,7 @@ if (!_progressCols.includes('user_id')) {
         last_score      INTEGER DEFAULT 0,
         last_played     TEXT,
         timestamps_json TEXT,
-        mastery         TEXT    DEFAULT 'non_maitrisee',
+        mastery         TEXT,
         in_playlist     INTEGER DEFAULT 0,
         PRIMARY KEY (user_id, song_id),
         FOREIGN KEY(song_id) REFERENCES songs(id)
@@ -145,15 +195,141 @@ if (!_progressCols.includes('user_id')) {
     `);
   }
 }
+// "No status" is stored as NULL. Older rows (and the old column default,
+// still in place on existing databases) wrote 'non_maitrisee' instead, which
+// made merely-played songs count as tagged.
+db.exec(`UPDATE progress SET mastery = NULL WHERE mastery = 'non_maitrisee'`);
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    username      TEXT    NOT NULL UNIQUE,
-    password_hash TEXT    NOT NULL,
-    created_at    TEXT    DEFAULT (datetime('now'))
-  );
-`);
+// ─── XP & LEVELS ──────────────────────────────────────────────────────────────
+// XP is earned by actions and written to the xp_events ledger at the moment
+// they happen; users.xp caches the total. Self-declared progress (marking a
+// song "apprise") earns none, so XP can't be inflated with one click.
+const XP = {
+  song:         10,   // finished song, any score
+  songGood:      5,   // bonus at 50 % or more
+  songPerfect:   5,   // extra bonus at 100 %
+  songDailyCap:  3,   // XP-earning plays per song per day (anti-farming)
+  emission:     40,   // finished emission, win or lose
+  emissionWin:  40,   // duel won
+  emissionTie:  20,   // duel tied
+  emissionDailyCap: 10,
+  challenge:    50,   // daily challenge passed
+  finalePerXp: 200,   // 1 XP per 200 € won in the final (20 000 € → 100 XP)
+};
+const FINAL_GAINS = [0, 1000, 2000, 5000, 10000, 20000];
+
+const songXp = score => XP.song + (score >= 50 ? XP.songGood : 0) + (score >= 100 ? XP.songPerfect : 0);
+
+// Solo has no opponent: the category points (max 150) add up to 30 XP instead
+function emissionXp({ mode, score, oppScore }) {
+  if (mode === 'duel') {
+    return XP.emission + (score > oppScore ? XP.emissionWin : score === oppScore ? XP.emissionTie : 0);
+  }
+  return XP.emission + Math.min(30, Math.floor((score || 0) / 5));
+}
+
+// Level L starts at 50·L·(L−1) XP: 100, 300, 600, 1 000, 1 500… — each
+// level takes 100 XP more than the previous one (≈ one more emission).
+const xpForLevel = L => 50 * L * (L - 1);
+const LEVEL_TITLES = [
+  [75, 'Légende du plateau'], [50, 'Maître des paroles'], [40, 'Champion'], [30, 'Maestro'],
+  [20, 'Virtuose'], [15, 'Expert'], [10, 'Confirmé'], [5, 'Novice'], [1, 'Débutant'],
+];
+
+function levelFromXp(xp) {
+  let level = 1;
+  while (xpForLevel(level + 1) <= xp) level++;
+  const [, title] = LEVEL_TITLES.find(([min]) => level >= min);
+  const nextTier = [...LEVEL_TITLES].reverse().find(([min]) => min > level);
+  return {
+    level, xp, title,
+    levelStart: xpForLevel(level),
+    nextLevel: xpForLevel(level + 1),
+    nextTitle: nextTier ? { level: nextTier[0], title: nextTier[1] } : null,
+  };
+}
+
+const stmtXpEvent = db.prepare(`INSERT INTO xp_events (user_id, kind, amount, ref) VALUES (?, ?, ?, ?)`);
+const stmtXpAdd   = db.prepare(`UPDATE users SET xp = xp + ? WHERE id = ?`);
+const stmtXpGet   = db.prepare(`SELECT xp FROM users WHERE id = ?`);
+
+// Awards XP atomically; returns what the client needs for a "+N XP" toast.
+function awardXp(uid, kind, amount, ref = null) {
+  const before = stmtXpGet.get(uid)?.xp ?? 0;
+  if (amount > 0) {
+    db.transaction(() => {
+      stmtXpEvent.run(uid, kind, amount, ref);
+      stmtXpAdd.run(amount, uid);
+    })();
+  }
+  const after = levelFromXp(before + Math.max(0, amount));
+  return { gained: Math.max(0, amount), level: after, leveledUp: after.level > levelFromXp(before).level };
+}
+
+// One-time: turn the history recorded before the ledger existed into XP
+if (!db.prepare(`SELECT 1 FROM app_meta WHERE key = 'xp_backfill'`).get()) {
+  db.transaction(() => {
+    for (const { id } of db.prepare(`SELECT id FROM users`).all()) {
+      const plays = db.prepare(`SELECT COUNT(*) AS n FROM sessions WHERE user_id = ?`).get(id).n;
+      const challenges = db.prepare(`SELECT COUNT(*) AS n FROM daily_challenges WHERE user_id = ? AND completed = 1`).get(id).n;
+      const emissionTotal = db.prepare(`SELECT mode, score, opp_score AS oppScore FROM emissions WHERE user_id = ?`).all(id)
+        .reduce((sum, e) => sum + emissionXp(e), 0);
+      const parts = [['backfill_songs', plays * XP.song], ['backfill_challenges', challenges * XP.challenge],
+                     ['backfill_emissions', emissionTotal]];
+      for (const [kind, amount] of parts) if (amount > 0) stmtXpEvent.run(id, kind, amount, null);
+      db.prepare(`UPDATE users SET xp = (SELECT COALESCE(SUM(amount), 0) FROM xp_events WHERE user_id = ?) WHERE id = ?`).run(id, id);
+    }
+    db.prepare(`INSERT INTO app_meta (key, value) VALUES ('xp_backfill', datetime('now'))`).run();
+  })();
+}
+
+// ─── SESSION STORE ────────────────────────────────────────────────────────────
+// Sessions live in SQLite instead of express-session's MemoryStore (which
+// leaks and logs everyone out on restart). Only the session id is in the
+// cookie; the row holds the user id and CSRF token.
+class SqliteSessionStore extends session.Store {
+  constructor(database) {
+    super();
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS http_sessions (
+        sid     TEXT PRIMARY KEY,
+        sess    TEXT NOT NULL,
+        expires INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_http_sessions_expires ON http_sessions(expires);
+    `);
+    this.getStmt   = database.prepare(`SELECT sess FROM http_sessions WHERE sid = ? AND expires > ?`);
+    this.setStmt   = database.prepare(`INSERT INTO http_sessions (sid, sess, expires) VALUES (?, ?, ?)
+                                       ON CONFLICT(sid) DO UPDATE SET sess = excluded.sess, expires = excluded.expires`);
+    this.touchStmt = database.prepare(`UPDATE http_sessions SET expires = ? WHERE sid = ?`);
+    this.delStmt   = database.prepare(`DELETE FROM http_sessions WHERE sid = ?`);
+    this.purgeStmt = database.prepare(`DELETE FROM http_sessions WHERE expires <= ?`);
+    this.purgeStmt.run(Date.now());
+    setInterval(() => this.purgeStmt.run(Date.now()), 3600 * 1000).unref();
+  }
+  static expiry(sess) {
+    const exp = sess?.cookie?.expires ? new Date(sess.cookie.expires).getTime() : NaN;
+    return Number.isFinite(exp) ? exp : Date.now() + 24 * 3600 * 1000;
+  }
+  get(sid, cb) {
+    try {
+      const row = this.getStmt.get(sid, Date.now());
+      cb(null, row ? JSON.parse(row.sess) : null);
+    } catch (e) { cb(e); }
+  }
+  set(sid, sess, cb) {
+    try { this.setStmt.run(sid, JSON.stringify(sess), SqliteSessionStore.expiry(sess)); cb?.(null); }
+    catch (e) { cb?.(e); }
+  }
+  touch(sid, sess, cb) {
+    try { this.touchStmt.run(SqliteSessionStore.expiry(sess), sid); cb?.(null); }
+    catch (e) { cb?.(e); }
+  }
+  destroy(sid, cb) {
+    try { this.delStmt.run(sid); cb?.(null); }
+    catch (e) { cb?.(e); }
+  }
+}
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15-minute window
@@ -162,16 +338,32 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Trop de tentatives, réessayez dans 15 minutes' },
 });
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Trop de créations de compte, réessayez plus tard' },
+});
 
-app.use(express.json({ limit: '5mb' }));
+// Behind a TLS-terminating reverse proxy, set TRUST_PROXY=1 so secure cookies work
+if (process.env.TRUST_PROXY) app.set('trust proxy', 1);
+
+// A 4 MB image is ~5.4 MB once base64-encoded: only the avatar route gets that much
+const jsonSmall  = express.json({ limit: '1mb' });
+const jsonAvatar = express.json({ limit: '6mb' });
+app.use((req, res, next) => (req.path === '/api/profile/avatar' ? jsonAvatar : jsonSmall)(req, res, next));
 app.use(session({
+  store: new SqliteSessionStore(db),
   secret: process.env.SESSION_SECRET,
+  name: 'noplr.sid',
   resave: false,
   saveUninitialized: false,
   cookie: {
     maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
     httpOnly: true,
     sameSite: 'strict',
+    secure: 'auto',                   // Secure flag whenever the request came over HTTPS
   },
 }));
 app.use(express.static(path.join(__dirname, 'public'), {
@@ -197,40 +389,66 @@ app.get('/api/auth/me', (req, res) => {
   res.json({ ...user, csrfToken: req.session.csrfToken });
 });
 
-app.post('/api/auth/register', async (req, res) => {
+// Public-facing names (future leaderboards and profiles): 3–24 letters, digits,
+// spaces and . _ - ' — no markup, no invisible characters.
+const USERNAME_RE = /^[\p{L}\p{N}](?:[\p{L}\p{N} ._'-]{1,22})[\p{L}\p{N}]$/u;
+const usernameError = name =>
+  typeof name !== 'string' || !USERNAME_RE.test(name)
+    ? 'Pseudo : 3 à 24 caractères (lettres, chiffres, espace, . _ - \')'
+    : null;
+const stmtUsernameTaken = db.prepare(`SELECT id FROM users WHERE username = ? COLLATE NOCASE AND id != ?`);
+
+// New session id on every login: a session id planted before login
+// (session fixation) never becomes an authenticated one.
+function startUserSession(req, res, user) {
+  req.session.regenerate(err => {
+    if (err) return res.status(500).json({ error: 'Erreur de session' });
+    req.session.userId    = user.id;
+    req.session.username  = user.username;
+    req.session.csrfToken = crypto.randomBytes(32).toString('hex');
+    res.json({ ok: true, user: { id: user.id, username: user.username, avatar_url: user.avatar_url || null },
+               csrfToken: req.session.csrfToken });
+  });
+}
+
+app.post('/api/auth/register', registerLimiter, async (req, res) => {
   const { username, password } = req.body || {};
-  if (!username?.trim() || !password) return res.status(400).json({ error: 'Champs requis' });
-  if (username.trim().length > 64 || password.length > 128) {
-    return res.status(400).json({ error: "Nom d'utilisateur ou mot de passe trop long" });
+  if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
+    return res.status(400).json({ error: 'Champs requis' });
   }
-  if (db.prepare(`SELECT id FROM users WHERE username = ?`).get(username.trim())) {
+  const name = username.trim().normalize('NFC');
+  const nameErr = usernameError(name);
+  if (nameErr) return res.status(400).json({ error: nameErr });
+  if (password.length < 8)   return res.status(400).json({ error: 'Mot de passe : 8 caractères minimum' });
+  if (password.length > 128) return res.status(400).json({ error: 'Mot de passe trop long' });
+  if (stmtUsernameTaken.get(name, 0)) {
     return res.status(409).json({ error: "Nom d'utilisateur déjà pris" });
   }
-  const hash = await bcrypt.hash(password, 10);
-  const { lastInsertRowid: id } = db.prepare(
-    `INSERT INTO users (username, password_hash) VALUES (?,?)`
-  ).run(username.trim(), hash);
-  req.session.userId   = id;
-  req.session.username = username.trim();
-  req.session.csrfToken = crypto.randomBytes(32).toString('hex');
-  res.json({ ok: true, user: { id, username: username.trim() }, csrfToken: req.session.csrfToken });
+  const hash = await bcrypt.hash(password, 12);
+  let id;
+  try {
+    ({ lastInsertRowid: id } = db.prepare(`INSERT INTO users (username, password_hash) VALUES (?,?)`).run(name, hash));
+  } catch (_) {
+    return res.status(409).json({ error: "Nom d'utilisateur déjà pris" });
+  }
+  startUserSession(req, res, { id, username: name });
 });
 
 app.post('/api/auth/login', loginLimiter, async (req, res) => {
   const { username, password } = req.body || {};
-  if (!username || !password) return res.status(400).json({ error: 'Champs requis' });
+  if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
+    return res.status(400).json({ error: 'Champs requis' });
+  }
   // Reject absurdly long inputs before bcrypt touches them (event-loop DoS prevention).
   if (username.length > 64 || password.length > 128) {
     return res.status(401).json({ error: 'Identifiants invalides' });
   }
-  const user = db.prepare(`SELECT * FROM users WHERE username = ?`).get(username.trim());
+  const user = db.prepare(`SELECT * FROM users WHERE username = ?`).get(username.trim())
+            || db.prepare(`SELECT * FROM users WHERE username = ? COLLATE NOCASE`).get(username.trim());
   if (!user || !(await bcrypt.compare(password, user.password_hash))) {
     return res.status(401).json({ error: 'Identifiants invalides' });
   }
-  req.session.userId    = user.id;
-  req.session.username  = user.username;
-  req.session.csrfToken = crypto.randomBytes(32).toString('hex');
-  res.json({ ok: true, user: { id: user.id, username: user.username, avatar_url: user.avatar_url }, csrfToken: req.session.csrfToken });
+  startUserSession(req, res, user);
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -265,24 +483,38 @@ const UA_ARTIST = 'unaccent(s.artist)';
 const UA_TITLE  = 'unaccent(s.title)';
 const DEFAULT_ORDER = `${UA_ARTIST}, ${UA_TITLE}`;
 
-function refreshAired12m() {
+// Songs that are the same recording on several wiki pages are grouped in the
+// library by title + the start of their lyrics. The key only depends on the
+// catalogue, so it is computed once (and refreshed with aired_12m) instead of
+// hashing every song's lyrics on each library request.
+const songGroupKey = new Map();
+
+function lyricsKey(lyrics) {
+  // First 300 letters: minor typos between wiki pages don't split a group
+  const letters = (lyrics || '').toLowerCase().replace(/[^a-z]/g, '').slice(0, 300);
+  return letters ? crypto.createHash('md5').update(letters).digest('hex') : '__empty__';
+}
+
+function refreshCatalogueCache() {
   const cutoff = db.prepare(`SELECT date('now','localtime','-365 days') AS d`).get().d;
-  const rows = db.prepare(`SELECT id, show_dates_json FROM songs`).all();
+  const rows = db.prepare(`SELECT id, title, lyrics, show_dates_json FROM songs`).all();
   const upd  = db.prepare(`UPDATE songs SET aired_12m = ? WHERE id = ?`);
+  songGroupKey.clear();
   db.transaction(() => {
     for (const r of rows) {
       let n = 0;
       try { n = (JSON.parse(r.show_dates_json) || []).filter(d => d >= cutoff).length; } catch (_) {}
       upd.run(n, r.id);
+      songGroupKey.set(r.id, (r.title || '').toLowerCase().trim() + '||' + lyricsKey(r.lyrics));
     }
   })();
 }
-refreshAired12m();
-setInterval(refreshAired12m, 12 * 3600 * 1000).unref();
+refreshCatalogueCache();
+setInterval(refreshCatalogueCache, 12 * 3600 * 1000).unref();
 
 const SORT_MAP = {
   aired_desc:      `s.aired_12m DESC, ${DEFAULT_ORDER}`,
-  z_a:             `${UA_ARTIST} DESC, ${UA_TITLE} DESC`,
+  z_a:             '',   // alphabetical orders are applied after grouping, in JS
   word_count_asc:  `s.word_count ASC NULLS LAST, ${DEFAULT_ORDER}`,
   word_count_desc: `s.word_count DESC NULLS LAST, ${DEFAULT_ORDER}`,
   mc_count_desc:   `s.mc_count DESC NULLS LAST, ${DEFAULT_ORDER}`,
@@ -293,22 +525,20 @@ const SORT_MAP = {
 };
 
 app.get('/api/songs', (req, res) => {
-  const { search, artist, type, mastery, sort, playlist, limit = 50, offset = 0 } = req.query;
-  const playlistId = playlist ? (parseInt(playlist) || null) : null;
+  const { search, type, mastery, sort, playlist } = req.query;
+  const playlistId = parseInt(playlist) || null;
+  const lim = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
+  const off = Math.max(parseInt(req.query.offset) || 0, 0);
   const uid = req.session.userId;
 
   let where = `1=1`;
-  const params = [uid];
+  const params = [uid, uid];
 
   if (search) {
     // Case- and accent-insensitive: "a toi" finds "À toi"
-    const term = `%${unaccentJs(search.trim())}%`;
+    const term = `%${unaccentJs(String(search).trim())}%`;
     where += ` AND (${UA_TITLE} LIKE ? OR ${UA_ARTIST} LIKE ?)`;
     params.push(term, term);
-  }
-  if (artist) {
-    where += ` AND s.artist = ?`;
-    params.push(artist);
   }
   if (type === 'mc') {
     where += ` AND s.mc_count > 0`;
@@ -318,12 +548,10 @@ app.get('/api/songs', (req, res) => {
     where += ` AND (s.mc_count = 0 OR s.mc_count IS NULL) AND (s.fn_count = 0 OR s.fn_count IS NULL)`;
   } else if (type === 'mal_aimees') {
     where += ` AND (s.chosen_count + s.not_chosen_count) > 0`;
-  } else if (type === 'year_todo') {
-    where += ` AND s.aired_12m > 0 AND (p.mastery IS NULL OR p.mastery != 'maitrisee')`;
   }
   if (mastery === 'non_maitrisee') {
-    where += ` AND (p.mastery = 'non_maitrisee' OR p.mastery IS NULL)`;
-  } else if (mastery) {
+    where += ` AND p.mastery IS NULL`;
+  } else if (VALID_MASTERY.includes(mastery)) {
     where += ` AND p.mastery = ?`;
     params.push(mastery);
   }
@@ -332,52 +560,35 @@ app.get('/api/songs', (req, res) => {
     params.push(playlistId);
   }
   // "Mal aimées" ranks by pick rate unless another sort was chosen explicitly
-  const sortBy  = sort || (type === 'mal_aimees' ? 'mal_aimees' : type === 'year_todo' ? 'aired_desc' : '');
-  const orderBy = SORT_MAP[sortBy] || 's.artist, s.title';
-  const inSelectedExpr = playlistId
-    ? `(SELECT COUNT(*) FROM playlist_songs WHERE playlist_id = ${playlistId} AND song_id = s.id) as in_selected_playlist`
-    : `0 as in_selected_playlist`;
+  const sortBy  = Object.hasOwn(SORT_MAP, sort) ? sort : (type === 'mal_aimees' ? 'mal_aimees' : '');
 
-  // Fetch all matching songs (no SQL LIMIT) so we can group duplicates
-  // before paginating — SQLite is fast enough for ~3000 rows.
+  // All matching songs (no SQL LIMIT) so duplicates are grouped before paging
   const allSongs = db.prepare(`
     SELECT s.id, s.title, s.artist, s.year, s.youtube_url, s.word_count, s.show_count,
            s.mc_count, s.fn_count, s.chosen_count, s.not_chosen_count, s.aired_12m,
-           s.lyrics,
-           p.attempts, p.best_score, p.last_score, p.last_played,
            p.mastery,
-           COALESCE(p.in_playlist, 0) as in_playlist,
-           ${inSelectedExpr},
            EXISTS(SELECT 1 FROM playlist_songs ps JOIN playlists pl ON pl.id = ps.playlist_id
                   WHERE pl.user_id = ? AND pl.is_default = 1 AND ps.song_id = s.id) as in_default
     FROM songs s
     LEFT JOIN progress p ON s.id = p.song_id AND p.user_id = ?
     WHERE ${where}
-    ORDER BY ${orderBy}
-  `).all(uid, ...params);
-
-  // Normalize lyrics to a fingerprint for grouping:
-  // use the first 300 chars of normalized lyrics so minor typos between wiki
-  // pages don't prevent grouping, while still distinguishing different songs.
-  function lyricsKey(lyrics) {
-    const norm = (lyrics || '').toLowerCase().replace(/\s+/g, '').replace(/[^a-z]/g, '').slice(0, 300);
-    if (!norm) return '__empty__';
-    return crypto.createHash('md5').update(norm).digest('hex');
-  }
+    ${SORT_MAP[sortBy] ? `ORDER BY ${SORT_MAP[sortBy]}` : ''}
+  `).all(...params);
 
   // Group by normalised title + lyrics fingerprint — keeps different songs with
   // the same title (e.g. "Les mots" by Keen'V vs Mylène Farmer) separate.
   const groups = new Map(); // key → [songs]
   for (const s of allSongs) {
-    const key = s.title.toLowerCase().trim() + '||' + lyricsKey(s.lyrics);
+    const key = songGroupKey.get(s.id) ?? s.id;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(s);
   }
 
   const grouped = [];
   for (const versions of groups.values()) {
+    // Most-aired version first; the sort is stable, so ties keep the query order
     versions.sort((a, b) => (b.show_count || 0) - (a.show_count || 0));
-    const { lyrics: _l, ...primary } = versions[0];
+    const primary = versions[0];
     if (versions.length > 1) {
       primary.alt_versions = versions.slice(1).map(v => ({
         id: v.id, artist: v.artist, year: v.year, show_count: v.show_count,
@@ -386,92 +597,84 @@ app.get('/api/songs', (req, res) => {
     grouped.push(primary);
   }
 
-  // Re-sort grouped results (grouping disrupts order for multi-version songs)
-  const sortKey = sortBy && SORT_MAP[sortBy];
-  if (!sortKey || sortKey.startsWith('unaccent')) {
+  // Alphabetical orders are done here with French collation (é next to e)
+  if (!sortBy || sortBy === 'z_a') {
     const dir = sortBy === 'z_a' ? -1 : 1;
-    grouped.sort((a, b) => dir * (
-      (a.artist || '').localeCompare(b.artist || '', 'fr') || (a.title || '').localeCompare(b.title || '', 'fr')
-    ));
+    const coll = new Intl.Collator('fr', { sensitivity: 'base' });
+    grouped.sort((a, b) => dir * (coll.compare(a.artist || '', b.artist || '') || coll.compare(a.title || '', b.title || '')));
   }
 
-  const total = grouped.length;
-  const lim   = parseInt(limit);
-  const off   = parseInt(offset);
-  const songs = grouped.slice(off, off + lim);
-
-  res.json({ songs, total });
-});
-
-// GET home data (stats + recents + playlist)
-
-// GET distinct artists
-app.get('/api/artists', (req, res) => {
-  const artists = db.prepare(
-    `SELECT DISTINCT artist FROM songs WHERE youtube_url IS NOT NULL AND youtube_url != '' ORDER BY artist`
-  ).all();
-  res.json(artists.map(a => a.artist));
+  res.json({ songs: grouped.slice(off, off + lim), total: grouped.length });
 });
 
 // GET single song with full data
 app.get('/api/songs/:id', (req, res) => {
   const song = db.prepare(`SELECT * FROM songs WHERE id = ?`).get(req.params.id);
-  if (!song) return res.status(404).json({ error: 'Not found' });
+  if (!song) return res.status(404).json({ error: 'Chanson introuvable' });
   const prog = db.prepare(`SELECT * FROM progress WHERE song_id = ? AND user_id = ?`).get(req.params.id, req.session.userId);
   res.json({ ...song, progress: prog || null, mastery: prog?.mastery || null, timestamps_json: prog?.timestamps_json || null });
 });
 
 // POST save attempt after a game session
+const stmtSongPlaysToday = db.prepare(`
+  SELECT COUNT(*) AS n FROM xp_events WHERE user_id = ? AND kind = 'song' AND ref = ? AND day = date('now','localtime')`);
+
 app.post('/api/songs/:id/attempt', (req, res) => {
-  const { score } = req.body;
   const songId = req.params.id;
   const uid    = req.session.userId;
-  const existing = db.prepare(`SELECT song_id FROM progress WHERE song_id = ? AND user_id = ?`).get(songId, uid);
-  if (existing) {
+  const score  = Math.round(Number(req.body?.score));
+  if (!Number.isFinite(score) || score < 0 || score > 100) return res.status(400).json({ error: 'Score invalide' });
+  if (!stmtSongExists.get(songId)) return res.status(404).json({ error: 'Chanson introuvable' });
+  // Only a run started from the challenge card counts, so replaying the song
+  // at an easier level from the library can't validate it.
+  const today = req.body?.challenge === true ? todaysChallenge() : null;
+
+  const challengeDone = db.transaction(() => {
     db.prepare(`
-      UPDATE progress SET
-        attempts = attempts + 1,
-        best_score = MAX(best_score, ?),
-        last_score = ?,
-        last_played = datetime('now')
-      WHERE song_id = ? AND user_id = ?
-    `).run(score, score, songId, uid);
-  } else {
-    db.prepare(`
-      INSERT INTO progress (user_id, song_id, attempts, best_score, last_score, last_played)
-      VALUES (?, ?, 1, ?, ?, datetime('now'))
+      INSERT INTO progress (user_id, song_id, attempts, best_score, last_score, last_played, mastery)
+      VALUES (?, ?, 1, ?, ?, datetime('now'), NULL)
+      ON CONFLICT(user_id, song_id) DO UPDATE SET
+        attempts    = attempts + 1,
+        best_score  = MAX(COALESCE(best_score, 0), excluded.best_score),
+        last_score  = excluded.last_score,
+        last_played = excluded.last_played
     `).run(uid, songId, score, score);
+    db.prepare(`INSERT INTO sessions (user_id, song_id, played_at) VALUES (?, ?, date('now','localtime'))`).run(uid, songId);
+    if (!today || today.song_id !== songId || score < CHALLENGE_PASS) return false;
+    return db.prepare(`
+      INSERT INTO daily_challenges (user_id, day, song_id, completed) VALUES (?, date('now','localtime'), ?, 1)
+      ON CONFLICT(user_id, day) DO UPDATE SET song_id = excluded.song_id, completed = 1 WHERE completed = 0
+    `).run(uid, songId).changes > 0;
+  })();
+
+  const earnsXp = stmtSongPlaysToday.get(uid, songId).n < XP.songDailyCap;
+  let xp = awardXp(uid, 'song', earnsXp ? songXp(score) : 0, songId);
+  if (challengeDone) {
+    const bonus = awardXp(uid, 'challenge', XP.challenge, songId);
+    xp = { ...bonus, gained: xp.gained + bonus.gained, leveledUp: xp.leveledUp || bonus.leveledUp };
   }
-  db.prepare(`INSERT INTO sessions (user_id, song_id, played_at) VALUES (?, ?, date('now','localtime'))`).run(uid, songId);
-  if (Number(score) >= CHALLENGE_PASS) {
-    db.prepare(`
-      UPDATE daily_challenges SET completed = 1
-      WHERE user_id = ? AND day = date('now','localtime') AND song_id = ?
-    `).run(uid, songId);
-  }
-  res.json({ ok: true });
+  res.json({ ok: true, xp, challengeDone });
 });
 
 // PUT save timestamps (calibration)
 app.put('/api/songs/:id/timestamps', (req, res) => {
-  const { timestamps } = req.body;
+  const { timestamps } = req.body || {};
   const songId = req.params.id;
   const uid    = req.session.userId;
-  const existing = db.prepare(`SELECT song_id FROM progress WHERE song_id = ? AND user_id = ?`).get(songId, uid);
-  if (existing) {
-    db.prepare(`UPDATE progress SET timestamps_json = ? WHERE song_id = ? AND user_id = ?`)
-      .run(JSON.stringify(timestamps), songId, uid);
-  } else {
-    db.prepare(`INSERT INTO progress (user_id, song_id, timestamps_json) VALUES (?, ?, ?)`)
-      .run(uid, songId, JSON.stringify(timestamps));
+  if (!Array.isArray(timestamps) || timestamps.length > 2000 || timestamps.some(t => !Number.isInteger(t?.lineIdx) || !Number.isFinite(t?.time))) {
+    return res.status(400).json({ error: 'Timestamps invalides' });
   }
+  if (!stmtSongExists.get(songId)) return res.status(404).json({ error: 'Chanson introuvable' });
+  db.prepare(`
+    INSERT INTO progress (user_id, song_id, timestamps_json, mastery) VALUES (?, ?, ?, NULL)
+    ON CONFLICT(user_id, song_id) DO UPDATE SET timestamps_json = excluded.timestamps_json
+  `).run(uid, songId, JSON.stringify(timestamps));
   res.json({ ok: true });
 });
 
 // GET playlists containing a specific song
 app.get('/api/songs/:id/playlists', (req, res) => {
   const uid = req.session.userId;
-  if (!uid) return res.status(401).json({ error: 'Non connecté' });
   const rows = db.prepare(`
     SELECT ps.playlist_id FROM playlist_songs ps
     JOIN playlists pl ON pl.id = ps.playlist_id
@@ -501,7 +704,7 @@ function setMastery(uid, songId, mastery) {
 }
 
 app.put('/api/songs/:id/mastery', (req, res) => {
-  const { mastery } = req.body;
+  const { mastery } = req.body || {};
   const uid = req.session.userId;
   if (!VALID_MASTERY.includes(mastery)) return res.status(400).json({ error: 'Invalid mastery value' });
   if (!stmtSongExists.get(req.params.id)) return res.status(404).json({ error: 'Chanson introuvable' });
@@ -564,81 +767,22 @@ app.post('/api/songs/match', (req, res) => {
   res.json(clean.map(matchLine));
 });
 
-// PUT toggle playlist
-app.put('/api/songs/:id/playlist', (req, res) => {
-  const { in_playlist } = req.body;
-  const songId = req.params.id;
-  const uid    = req.session.userId;
-  const val    = in_playlist ? 1 : 0;
-  const existing = db.prepare(`SELECT song_id FROM progress WHERE song_id = ? AND user_id = ?`).get(songId, uid);
-  if (existing) {
-    db.prepare(`UPDATE progress SET in_playlist = ? WHERE song_id = ? AND user_id = ?`).run(val, songId, uid);
-  } else {
-    db.prepare(`INSERT INTO progress (user_id, song_id, in_playlist) VALUES (?, ?, ?)`).run(uid, songId, val);
-  }
-  res.json({ ok: true });
-});
-
-// GET dashboard stats (scoped to the logged-in user)
-app.get('/api/stats', (req, res) => {
-  const uid = req.session.userId;
-
-  const total    = db.prepare(`SELECT COUNT(*) as c FROM songs`).get().c;
-  const played   = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND attempts > 0`).get(uid).c;
-  const attempts = db.prepare(`SELECT SUM(attempts) as c FROM progress WHERE user_id = ?`).get(uid).c || 0;
-  const avgScore = db.prepare(`SELECT AVG(best_score) as v FROM progress WHERE user_id = ? AND attempts > 0`).get(uid).v;
-
-  // Count each named mastery status directly; everything else is implicitly non-mastered
-  const maitrisee     = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'maitrisee'`).get(uid).c;
-  const revision      = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'revision'`).get(uid).c;
-  const prevue        = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'prevue'`).get(uid).c;
-  const non_maitrisee = total - maitrisee - revision - prevue;
-  const masteryCounts = { maitrisee, revision, prevue, non_maitrisee };
-
-  const songs = db.prepare(`
-    SELECT s.id, s.title, s.artist, s.year, s.mc_count, s.fn_count,
-           p.attempts, p.best_score,
-           p.mastery,
-           COALESCE(p.in_playlist, 0) as in_playlist
-    FROM songs s
-    LEFT JOIN progress p ON s.id = p.song_id AND p.user_id = ?
-    ORDER BY s.artist, s.title
-  `).all(uid);
-
-  const playlist = songs.filter(s => s.in_playlist);
-
-  const top = db.prepare(`
-    SELECT s.title, s.artist, p.best_score, p.attempts
-    FROM progress p JOIN songs s ON s.id = p.song_id
-    WHERE p.user_id = ? AND p.attempts > 0
-    ORDER BY p.best_score DESC LIMIT 20
-  `).all(uid);
-
-  const by_artist = db.prepare(`
-    SELECT s.artist, COUNT(*) as total,
-           SUM(CASE WHEN p.attempts > 0 THEN 1 ELSE 0 END) as played,
-           AVG(CASE WHEN p.attempts > 0 THEN p.best_score END) as avg_score
-    FROM songs s LEFT JOIN progress p ON s.id = p.song_id AND p.user_id = ?
-    GROUP BY s.artist ORDER BY total DESC LIMIT 30
-  `).all(uid);
-
-  res.json({ total, played, attempts, avg_score: avgScore, ...masteryCounts, songs, playlist, top, by_artist });
-});
-
 // ─── PROFILE ──────────────────────────────────────────────────────────────────
 
-app.get('/api/profile', (req, res) => {
-  const uid = req.session.userId;
-  const user = db.prepare(`SELECT id, username, bio, avatar_url, favorite_songs_json FROM users WHERE id = ?`).get(uid);
-  const played     = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND attempts > 0`).get(uid).c;
-  const maitrisee  = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'maitrisee'`).get(uid).c;
-  const revision   = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'revision'`).get(uid).c;
-  const prevue     = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'prevue'`).get(uid).c;
-  // Distinct days with a session → rough emission count (2 per day on average)
+// Everything shown on a profile. Only whitelisted, non-sensitive fields, so the
+// same payload can later back public profiles and leaderboards (other users).
+function profileData(uid) {
+  const user = db.prepare(`
+    SELECT id, username, bio, avatar_url, created_at, xp, bells, final_winnings, favorite_songs_json
+    FROM users WHERE id = ?`).get(uid);
+  if (!user) return null;
+  const { played, maitrisee, revision, prevue } = db.prepare(`
+    SELECT COUNT(CASE WHEN attempts > 0 THEN 1 END)          AS played,
+           COUNT(CASE WHEN mastery = 'maitrisee' THEN 1 END) AS maitrisee,
+           COUNT(CASE WHEN mastery = 'revision'  THEN 1 END) AS revision,
+           COUNT(CASE WHEN mastery = 'prevue'    THEN 1 END) AS prevue
+    FROM progress WHERE user_id = ?`).get(uid);
   const emissions  = db.prepare(`SELECT COUNT(*) as c FROM emissions WHERE user_id = ?`).get(uid).c;
-  // Average best_score across all played songs (as % success rate)
-  const avgRow = db.prepare(`SELECT ROUND(AVG(best_score)) as avg FROM progress WHERE user_id = ? AND attempts > 0`).get(uid);
-  const successRate = avgRow.avg ?? 0;
   const total_songs = db.prepare(`SELECT COUNT(*) as c FROM songs`).get().c;
   const non_maitrisee = Math.max(0, total_songs - maitrisee - revision - prevue);
 
@@ -667,39 +811,51 @@ app.get('/api/profile', (req, res) => {
     }
   }
 
-  // Top artists by number of songs with any mastery tag
+  // Top artists by number of songs with a status (apprise / en cours / à revoir)
   const topArtists = db.prepare(`
     SELECT s.artist, COUNT(*) as tagged
     FROM progress p JOIN songs s ON s.id = p.song_id
-    WHERE p.user_id = ? AND p.mastery IS NOT NULL
+    WHERE p.user_id = ? AND p.mastery IN ('maitrisee','revision','prevue')
     GROUP BY s.artist ORDER BY tagged DESC LIMIT 5
   `).all(uid);
 
   // Favorites: user-curated list stored as JSON
-  const favJson = user.favorite_songs_json;
-  const favIds = favJson ? JSON.parse(favJson) : [];
+  let favIds = [];
+  try { favIds = JSON.parse(user.favorite_songs_json || '[]'); } catch (_) {}
   const favSongs = favIds.length
     ? db.prepare(`SELECT id, title, artist FROM songs WHERE id IN (${favIds.map(() => '?').join(',')})`)
         .all(...favIds)
         .sort((a, b) => favIds.indexOf(a.id) - favIds.indexOf(b.id))
     : [];
 
-  res.json({ user, played, total_songs, maitrisee, revision, prevue, non_maitrisee, emissions, successRate,
-             byType, totals, topArtists, favSongs });
+  const { favorite_songs_json: _f, xp, bells, final_winnings, ...identity } = user;
+  return { user: identity, level: levelFromXp(xp), bells, finalWinnings: final_winnings,
+           played, total_songs, maitrisee, revision, prevue, non_maitrisee, emissions,
+           byType, totals, topArtists, favSongs };
+}
+
+app.get('/api/profile', (req, res) => {
+  const data = profileData(req.session.userId);
+  if (!data) return res.status(404).json({ error: 'Profil introuvable' });
+  res.json(data);
 });
 
 app.put('/api/profile/favorites', (req, res) => {
   const uid = req.session.userId;
-  if (!uid) return res.status(401).json({ error: 'Non authentifié' });
   const { ids } = req.body || {};
-  if (!Array.isArray(ids) || ids.length > 5) return res.status(400).json({ error: 'ids invalides' });
-  db.prepare(`UPDATE users SET favorite_songs_json = ? WHERE id = ?`).run(JSON.stringify(ids), uid);
+  if (!Array.isArray(ids) || ids.length > 5 || ids.some(id => typeof id !== 'string')) {
+    return res.status(400).json({ error: 'ids invalides' });
+  }
+  const clean = [...new Set(ids)].filter(id => stmtSongExists.get(id));
+  db.prepare(`UPDATE users SET favorite_songs_json = ? WHERE id = ?`).run(JSON.stringify(clean), uid);
   res.json({ ok: true });
 });
 
+// A "Même chanson" round needs the cut point scraped for the song
+const MC_PLAYABLE = `s.mc_count > 0 AND s.mc_json IS NOT NULL AND s.mc_json != ''`;
+
 app.get('/api/revision-queue', (req, res) => {
   const uid = req.session.userId;
-  if (!uid) return res.status(401).json({ error: 'Non connecté' });
   const { mastery, count = 5, mc, source, id } = req.query;
   const n = Math.min(Math.max(1, parseInt(count) || 5), 50);
   let songs;
@@ -718,18 +874,12 @@ app.get('/api/revision-queue', (req, res) => {
       JOIN songs s ON s.id = ps.song_id
       WHERE pl.id = ? AND pl.user_id = ?
       ORDER BY RANDOM() LIMIT ?`).all(parseInt(id) || 0, uid, n);
-  } else if (source === 'year_todo') {
-    songs = db.prepare(`
-      SELECT s.id, s.title, s.artist, s.year
-      FROM songs s LEFT JOIN progress p ON p.song_id = s.id AND p.user_id = ?
-      WHERE s.aired_12m > 0 AND (p.mastery IS NULL OR p.mastery != 'maitrisee')
-      ORDER BY s.aired_12m DESC, RANDOM() LIMIT ?`).all(uid, n);
   } else if (mc === '1' || source === 'mc') {
     songs = db.prepare(`
       SELECT s.id, s.title, s.artist, s.year
-      FROM songs s WHERE s.mc_count > 0
+      FROM songs s WHERE ${MC_PLAYABLE}
       ORDER BY RANDOM() LIMIT ?`).all(n);
-  } else if (mastery) {
+  } else if (VALID_MASTERY.includes(mastery) && mastery !== 'non_maitrisee') {
     songs = db.prepare(`
       SELECT s.id, s.title, s.artist, s.year
       FROM songs s JOIN progress p ON p.song_id = s.id AND p.user_id = ?
@@ -745,17 +895,22 @@ app.put('/api/profile', (req, res) => {
   const uid = req.session.userId;
   const { username, bio } = req.body || {};
   if (username !== undefined) {
-    if (typeof username !== 'string' || !username.trim() || username.trim().length > 64)
-      return res.status(400).json({ error: 'Nom invalide' });
+    const name = typeof username === 'string' ? username.trim().normalize('NFC') : username;
+    const nameErr = usernameError(name);
+    if (nameErr) return res.status(400).json({ error: nameErr });
+    if (stmtUsernameTaken.get(name, uid)) return res.status(409).json({ error: 'Ce nom est déjà pris' });
     try {
-      db.prepare(`UPDATE users SET username = ? WHERE id = ?`).run(username.trim(), uid);
+      db.prepare(`UPDATE users SET username = ? WHERE id = ?`).run(name, uid);
     } catch (_) {
       return res.status(409).json({ error: 'Ce nom est déjà pris' });
     }
-    req.session.username = username.trim();
+    req.session.username = name;
   }
   if (bio !== undefined) {
-    db.prepare(`UPDATE users SET bio = ? WHERE id = ?`).run((bio || '').slice(0, 200), uid);
+    if (bio !== null && typeof bio !== 'string') return res.status(400).json({ error: 'Bio invalide' });
+    // Control and bidi-override characters stripped: the bio will be shown to other users
+    const clean = (bio || '').replace(/[\u0000-\u0008\u000B-\u001F\u007F\u200B-\u200F\u202A-\u202E]/g, '').trim().slice(0, 200);
+    db.prepare(`UPDATE users SET bio = ? WHERE id = ?`).run(clean || null, uid);
   }
   const user = db.prepare(`SELECT id, username, bio, avatar_url FROM users WHERE id = ?`).get(uid);
   res.json({ ok: true, user });
@@ -767,12 +922,22 @@ app.post('/api/profile/avatar', (req, res) => {
   if (!data || !type) return res.status(400).json({ error: 'Données manquantes' });
   const ALLOWED = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' };
   const ext = ALLOWED[type];
-  if (!ext) return res.status(400).json({ error: 'Format non supporté' });
+  if (!ext || typeof data !== 'string') return res.status(400).json({ error: 'Format non supporté' });
+  const buf = Buffer.from(data, 'base64');
+  if (!buf.length || buf.length > 4 * 1024 * 1024) return res.status(400).json({ error: 'Image trop grande (max 4 Mo)' });
+  // The declared type must match the file's real signature (no HTML/SVG disguised as an image)
+  const MAGIC = {
+    jpg:  b => b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF,
+    png:  b => b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])),
+    gif:  b => b.subarray(0, 4).toString('ascii') === 'GIF8',
+    webp: b => b.subarray(0, 4).toString('ascii') === 'RIFF' && b.subarray(8, 12).toString('ascii') === 'WEBP',
+  };
+  if (!MAGIC[ext](buf)) return res.status(400).json({ error: 'Fichier image invalide' });
   for (const f of fs.readdirSync(AVATARS_DIR)) {
     if (f.startsWith(`${uid}.`)) fs.unlinkSync(path.join(AVATARS_DIR, f));
   }
   const filename = `${uid}.${ext}`;
-  fs.writeFileSync(path.join(AVATARS_DIR, filename), Buffer.from(data, 'base64'));
+  fs.writeFileSync(path.join(AVATARS_DIR, filename), buf);
   const avatar_url = `/avatars/${filename}?v=${Date.now()}`;
   db.prepare(`UPDATE users SET avatar_url = ? WHERE id = ?`).run(avatar_url, uid);
   res.json({ ok: true, avatar_url });
@@ -826,53 +991,95 @@ function activityStats(uid) {
 }
 
 app.get('/api/profile/activity', (req, res) => {
-  const uid = req.session.userId;
-  if (!uid) return res.status(401).json({ error: 'Non connecté' });
-  const a = activityStats(uid);
+  const a = activityStats(req.session.userId);
   res.json({ today: a.today, days: a.days.slice(0, 60), streak: a.streak, maxStreak: a.maxStreak,
              totalActiveDays: a.totalActiveDays, streakAtRisk: a.streakAtRisk });
 });
 
-// ── Gamification: challenge, XP / levels, badges ───────────────────────
+// ── Gamification: challenge, badges ────────────────────────────────
 const CHALLENGE_PASS = 50;      // % needed on the daily challenge song
-const CHALLENGE_XP   = 50;
 const DAILY_GOAL     = 3;       // songs played or learned per day
 
-// Today's challenge is picked once and stored, so it stays put all day.
-function dailyChallenge(uid) {
-  let row = db.prepare(`SELECT song_id, completed FROM daily_challenges WHERE user_id = ? AND day = date('now','localtime')`).get(uid);
-  if (!row) {
-    const pool = db.prepare(`
-      SELECT s.id FROM songs s
-      LEFT JOIN progress p ON p.song_id = s.id AND p.user_id = ?
-      WHERE s.aired_12m > 0 AND (p.mastery IS NULL OR p.mastery != 'maitrisee')
-        AND s.id NOT IN (SELECT song_id FROM daily_challenges WHERE user_id = ? AND day >= date('now','localtime','-14 days'))
-      ORDER BY s.aired_12m DESC LIMIT 40
-    `).all(uid, uid);
-    if (!pool.length) return null;
-    const pick = pool[Math.floor(Math.random() * pool.length)].id;
-    db.prepare(`INSERT INTO daily_challenges (user_id, day, song_id) VALUES (?, date('now','localtime'), ?)`).run(uid, pick);
-    row = { song_id: pick, completed: 0 };
+// ── Daily challenge, shared by every player ─────────────────────────
+// One song per day for the whole platform, drawn the first time someone
+// opens the home screen that day and stored, so everyone gets the same
+// song, the same points category and the same missing lyrics.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS global_challenges (
+    day     TEXT PRIMARY KEY,
+    song_id TEXT NOT NULL,
+    level   INTEGER NOT NULL,
+    phrase  TEXT NOT NULL,
+    FOREIGN KEY(song_id) REFERENCES songs(id)
+  );
+`);
+const CHALLENGE_LEVELS = [10, 20, 30, 40, 50];
+const stmtGlobalToday = db.prepare(`SELECT * FROM global_challenges WHERE day = date('now','localtime')`);
+
+// { level: [phrases] } for the categories that have lyrics to find
+function playableLevels(blanksJson) {
+  let bj = {};
+  try { bj = JSON.parse(blanksJson || '{}') || {}; } catch (_) {}
+  const out = {};
+  for (const l of CHALLENGE_LEVELS) {
+    const phrases = bj[String(l)];
+    if (Array.isArray(phrases) && phrases.some(p => typeof p === 'string' && p.trim())) {
+      out[l] = phrases.filter(p => typeof p === 'string' && p.trim());
+    }
   }
-  const song = db.prepare(`SELECT id, title, artist, year, aired_12m FROM songs WHERE id = ?`).get(row.song_id);
-  return song && { ...song, completed: !!row.completed, xp: CHALLENGE_XP, pass: CHALLENGE_PASS };
+  return out;
 }
 
-// Level L starts at 50·L·(L−1) XP: 100, 300, 600, 1000, 1500…
-const xpForLevel = L => 50 * L * (L - 1);
-const LEVEL_TITLES = [
-  [25, 'Légende du plateau'], [18, 'Maestro'], [14, 'Maestro en herbe'], [10, 'Soliste'],
-  [7, 'Choriste confirmé'], [5, 'Choriste'], [3, 'Chanteur sous la douche'], [1, 'Débutant'],
-];
+// Candidates: songs aired over the last 12 months that are playable. We keep
+// the middle of the popularity range — at least 2 airings (not an unknown
+// one-off) and outside the 20 % most aired (the hits everyone knows).
+// A song is never drawn twice; once all were used, the oldest one comes back.
+function drawChallenge() {
+  const rows = db.prepare(`
+    SELECT id, aired_12m, blanks_json FROM songs
+    WHERE aired_12m > 0 AND lyrics IS NOT NULL AND lyrics != '' AND blanks_json IS NOT NULL
+    ORDER BY aired_12m DESC
+  `).all().filter(r => Object.keys(playableLevels(r.blanks_json)).length);
+  if (!rows.length) return null;
 
-function levelFromXp(xp) {
-  let level = 1;
-  while (xpForLevel(level + 1) <= xp) level++;
-  return {
-    level, xp,
-    title: LEVEL_TITLES.find(([min]) => level >= min)[1],
-    levelStart: xpForLevel(level),
-    nextLevel: xpForLevel(level + 1),
+  const middle = rows.slice(Math.ceil(rows.length * 0.2)).filter(r => r.aired_12m >= 2);
+  const pool = middle.length ? middle : rows;
+  const lastUsed = new Map(db.prepare(`SELECT song_id, MAX(day) AS day FROM global_challenges GROUP BY song_id`).all()
+    .map(r => [r.song_id, r.day]));
+  const fresh = pool.filter(r => !lastUsed.has(r.id));
+  const song = fresh.length
+    ? fresh[crypto.randomInt(fresh.length)]
+    : [...pool].sort((a, b) => (lastUsed.get(a.id) < lastUsed.get(b.id) ? -1 : 1))[0];
+
+  const levels  = playableLevels(song.blanks_json);
+  const keys    = Object.keys(levels).map(Number);
+  const level   = keys[crypto.randomInt(keys.length)];
+  const phrases = levels[level];
+  return { song_id: song.id, level, phrase: phrases[crypto.randomInt(phrases.length)] };
+}
+
+function todaysChallenge() {
+  let row = stmtGlobalToday.get();
+  if (!row) {
+    const pick = drawChallenge();
+    if (!pick) return null;
+    // Two first visitors at the same moment must not get different songs
+    db.prepare(`INSERT OR IGNORE INTO global_challenges (day, song_id, level, phrase) VALUES (date('now','localtime'), ?, ?, ?)`)
+      .run(pick.song_id, pick.level, pick.phrase);
+    row = stmtGlobalToday.get();
+  }
+  return row;
+}
+
+// The user's own row only tracks completion (badges, streak of challenges)
+function dailyChallenge(uid) {
+  const g = todaysChallenge();
+  if (!g) return null;
+  const mine = db.prepare(`SELECT song_id, completed FROM daily_challenges WHERE user_id = ? AND day = date('now','localtime')`).get(uid);
+  const song = db.prepare(`SELECT id, title, artist, year, aired_12m FROM songs WHERE id = ?`).get(g.song_id);
+  return song && {
+    ...song, level: g.level, phrase: g.phrase,
+    completed: !!mine?.completed, xp: XP.challenge,
   };
 }
 
@@ -917,7 +1124,7 @@ function gamification(uid, activity) {
   const coveragePct = cov.aired ? Math.round(cov.known / cov.aired * 100) : 0;
 
   const stats = { ...c, plays, challenges, emissions, coveragePct, maxStreak: activity.maxStreak };
-  const xp = c.learned * 10 + plays * 2 + challenges * CHALLENGE_XP + emissions * 20;
+  const xp = stmtXpGet.get(uid)?.xp ?? 0;
   const badges = BADGES.map(({ stat, goal, ...b }) => ({
     ...b, goal, value: Math.min(stats[stat], goal), unlocked: stats[stat] >= goal,
   }));
@@ -936,7 +1143,7 @@ app.get('/api/home', (req, res) => {
     FROM progress WHERE user_id = ?
   `).get(uid);
   const next = db.prepare(`
-    SELECT s.id, s.title, s.artist, s.year, p.mastery, p.last_score, p.last_played
+    SELECT s.id, s.title, s.artist, s.year, p.mastery, p.last_played
     FROM progress p JOIN songs s ON s.id = p.song_id
     WHERE p.user_id = ? AND p.mastery IN ('revision','prevue')
     ORDER BY (p.mastery = 'revision') DESC, p.last_played IS NOT NULL, p.last_played ASC
@@ -956,10 +1163,10 @@ app.get('/api/home', (req, res) => {
     FROM playlists p LEFT JOIN playlist_songs ps ON ps.playlist_id = p.id
     WHERE p.user_id = ? GROUP BY p.id ORDER BY p.is_default DESC, p.created_at
   `).all(uid);
-  const mcCount = db.prepare(`SELECT COUNT(*) AS n FROM songs WHERE mc_count > 0`).get().n;
+  const mcCount = db.prepare(`SELECT COUNT(*) AS n FROM songs s WHERE ${MC_PLAYABLE}`).get().n;
 
   const recentSongs = db.prepare(`
-    SELECT 'song' AS type, s.id, s.title, s.artist, p.last_score AS score, p.last_played AS at
+    SELECT 'song' AS type, s.id, s.title, s.artist, p.last_played AS at
     FROM progress p JOIN songs s ON s.id = p.song_id
     WHERE p.user_id = ? AND p.last_played IS NOT NULL
     ORDER BY p.last_played DESC LIMIT 4
@@ -978,46 +1185,65 @@ app.get('/api/home', (req, res) => {
     challenge: dailyChallenge(uid),
     coverage: { ...g.coverage, priority },
     playlists,
-    smart: { year_todo: g.coverage.aired - g.coverage.known, mc: mcCount },
+    smart: { mc: mcCount },
     badges: g.badges,
     recent,
   });
 });
 
-// POST a finished emission (score history, badges, XP)
+// POST a finished emission (score history, badges, XP, final winnings).
+// Needs the one-time token handed out by /api/emission/generate, so each
+// generated emission can be recorded (and rewarded) only once.
+const stmtEmissionsToday = db.prepare(`
+  SELECT COUNT(*) AS n FROM xp_events WHERE user_id = ? AND kind = 'emission' AND day = date('now','localtime')`);
+
 app.post('/api/emission/complete', (req, res) => {
   const uid = req.session.userId;
-  const { source, mode, score, oppScore } = req.body || {};
-  const okScore = v => v == null || (Number.isInteger(v) && v >= 0 && v <= 100000);
-  if (!['real', 'episode', 'generated'].includes(source) || !['solo', 'duel'].includes(mode) || !okScore(score) || !okScore(oppScore)) {
+  const { source, mode, score, oppScore, finalGain = null, token } = req.body || {};
+  const okScore = v => v == null || (Number.isInteger(v) && v >= 0 && v <= 1000);
+  if (!['real', 'episode', 'generated'].includes(source) || !['solo', 'duel'].includes(mode)
+      || !okScore(score) || !okScore(oppScore) || (finalGain !== null && !FINAL_GAINS.includes(finalGain))) {
     return res.status(400).json({ error: 'Données invalides' });
   }
-  db.prepare(`INSERT INTO emissions (user_id, source, mode, score, opp_score) VALUES (?, ?, ?, ?, ?)`)
-    .run(uid, source, mode, score ?? 0, mode === 'duel' ? (oppScore ?? 0) : null);
-  res.json({ ok: true });
+  if (!token || typeof token !== 'string' || token !== req.session.emissionToken) {
+    return res.status(409).json({ error: 'Émission déjà enregistrée ou inconnue' });
+  }
+  delete req.session.emissionToken;
+
+  const entry = { mode, score: score ?? 0, oppScore: mode === 'duel' ? (oppScore ?? 0) : null };
+  const underCap = stmtEmissionsToday.get(uid).n < XP.emissionDailyCap;
+  const gain = finalGain ?? 0;
+  const amount = underCap ? emissionXp(entry) + Math.floor(gain / XP.finalePerXp) : 0;
+
+  const { lastInsertRowid: emissionId } = db.transaction(() => {
+    const r = db.prepare(`INSERT INTO emissions (user_id, source, mode, score, opp_score, final_gain, xp) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(uid, source, mode, entry.score, entry.oppScore, finalGain, amount);
+    if (gain) db.prepare(`UPDATE users SET final_winnings = final_winnings + ? WHERE id = ?`).run(gain, uid);
+    return r;
+  })();
+  const xp = awardXp(uid, 'emission', amount, String(emissionId));
+  res.json({ ok: true, xp });
 });
 
 app.get('/api/emission/episodes', (req, res) => {
-  if (!req.session.userId) return res.status(401).json({ error: 'Non connecté' });
-  try {
-    const rows = db.prepare(`
-      SELECT id, air_date, emission_no
-      FROM real_episodes
-      WHERE air_date IS NOT NULL
-      ORDER BY air_date DESC, emission_no ASC
-      LIMIT 600
-    `).all();
-    res.json(rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  res.json(db.prepare(`
+    SELECT id, air_date, emission_no
+    FROM real_episodes
+    WHERE air_date IS NOT NULL
+    ORDER BY air_date DESC, emission_no ASC
+  `).all());
 });
 
 // ─── PLAYLISTS ────────────────────────────────────────────────────────────────
+
+// The default playlist was called "Révision"; it is the ★ list, now "Favoris"
+db.prepare(`UPDATE playlists SET name = 'Favoris' WHERE is_default = 1 AND name = 'Révision'`).run();
 
 function ensureDefaultPlaylist(uid) {
   const existing = db.prepare(`SELECT id FROM playlists WHERE user_id = ? AND is_default = 1`).get(uid);
   if (existing) return existing.id;
   const { lastInsertRowid: id } = db.prepare(
-    `INSERT INTO playlists (user_id, name, is_default) VALUES (?, 'Révision', 1)`
+    `INSERT INTO playlists (user_id, name, is_default) VALUES (?, 'Favoris', 1)`
   ).run(uid);
   const ins = db.prepare(`INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id) VALUES (?, ?)`);
   for (const s of db.prepare(`SELECT song_id FROM progress WHERE user_id = ? AND in_playlist = 1`).all(uid)) {
@@ -1039,12 +1265,10 @@ app.get('/api/playlists', (req, res) => {
 
 app.post('/api/playlists', (req, res) => {
   const uid = req.session.userId;
-  const { name } = req.body || {};
-  if (!name?.trim()) return res.status(400).json({ error: 'Nom requis' });
-  const { lastInsertRowid: id } = db.prepare(
-    `INSERT INTO playlists (user_id, name) VALUES (?, ?)`
-  ).run(uid, name.trim().slice(0, 64));
-  res.json({ id, name: name.trim(), is_default: 0, song_count: 0 });
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 64) : '';
+  if (!name) return res.status(400).json({ error: 'Nom requis' });
+  const { lastInsertRowid: id } = db.prepare(`INSERT INTO playlists (user_id, name) VALUES (?, ?)`).run(uid, name);
+  res.json({ id, name, is_default: 0, song_count: 0 });
 });
 
 app.delete('/api/playlists/:id', (req, res) => {
@@ -1060,6 +1284,7 @@ app.post('/api/playlists/:id/songs/:songId', (req, res) => {
   const uid = req.session.userId;
   const pl = db.prepare(`SELECT id FROM playlists WHERE id = ? AND user_id = ?`).get(req.params.id, uid);
   if (!pl) return res.status(404).json({ error: 'Playlist introuvable' });
+  if (!stmtSongExists.get(req.params.songId)) return res.status(404).json({ error: 'Chanson introuvable' });
   db.prepare(`INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id) VALUES (?, ?)`).run(pl.id, req.params.songId);
   res.json({ ok: true });
 });
@@ -1112,10 +1337,11 @@ async function callGemini(prompt, apiKey) {
   for (const model of GEMINI_MODELS) {
     try {
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+          signal: AbortSignal.timeout(20000),   // never leave the player waiting on a stuck request
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: {
@@ -1137,7 +1363,15 @@ async function callGemini(prompt, apiKey) {
   return null;
 }
 
-function shuffle(arr) { return [...arr].sort(() => Math.random() - 0.5); }
+// Fisher–Yates: every order equally likely
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 
 function norm(str) {
   return (str || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -1176,8 +1410,8 @@ const INFINITIVES = new Set([
   'esperer','penser','suivre','apprendre','garder','donner','toucher','regarder',
   'chercher','arriver','rentrer','sortir','monter','descendre','avancer','bouger',
   'commencer','raconter','expliquer','repondre','appeler','manger','boire','sourire',
-  'crier','passer','changer','vieillir','souffrir','guerir','fuir','courir','plaire',
-  'trahir','mentir','subir','unir','agir','reagir','saisir','detenir','obtenir',
+  'crier','passer','changer','vieillir','souffrir','guerir','fuir','plaire',
+  'trahir','subir','unir','agir','reagir','saisir','detenir','obtenir',
   'retenir','appartenir','prevenir','intervenir','soutenir','maintenir','parvenir',
 ]);
 
@@ -1749,7 +1983,6 @@ function pickMcSong(episodeId) {
 
 // ── Generated category builder (fallback / "Catégories inventées" mode) ──
 async function buildGeneratedPairs() {
-  {
     const songs = db.prepare(`SELECT id, title, artist, year, blanks_json FROM songs`).all();
 
     const parsed = songs.map(s => {
@@ -1871,7 +2104,6 @@ async function buildGeneratedPairs() {
       if (p && !p.categoryName) p.categoryName = p.label;
     }
     return pairsByLevel;
-  }
 }
 
 // ── Endpoint ──────────────────────────────────────────────────────
@@ -1879,24 +2111,30 @@ async function buildGeneratedPairs() {
 //         (replay a real episode) | 'generated' (invented categories)
 app.post('/api/emission/generate', async (req, res) => {
   try {
-    const source = (req.body && req.body.source) || 'real';
+    const source = ['real', 'episode', 'generated'].includes(req.body?.source) ? req.body.source : 'real';
 
     let pairsByLevel, episodeId = null;
     if (source === 'generated') {
       pairsByLevel = await buildGeneratedPairs();
     } else if (source === 'episode') {
-      const specificId = req.body.episodeId ? parseInt(req.body.episodeId) : null;
+      const specificId = parseInt(req.body?.episodeId) || null;
       ({ pairsByLevel, episodeId } = buildEpisodePairs(specificId));
     } else {
       pairsByLevel = buildRealPairs();
     }
 
-    const pairs = EMISSION_LEVELS.map(l => pairsByLevel[l] ?? null);
+    // Replayed episodes can have categories above 50 pts: keep them all
+    const levels = source === 'episode'
+      ? Object.keys(pairsByLevel).map(Number).sort((a, b) => b - a)
+      : EMISSION_LEVELS;
+    const pairs = levels.map(l => pairsByLevel[l] ?? null);
     for (const p of pairs) if (p && !p.categoryName) p.categoryName = p.label;
 
     rememberEmission(pairs);
+    req.session.emissionToken = crypto.randomBytes(16).toString('hex');
 
     res.json({
+      token: req.session.emissionToken,
       source,
       pairs: pairs.map(p => p
         ? { ...p, categoryName: p.categoryName || `Catégorie ${p.level} pts` }
@@ -1905,8 +2143,20 @@ app.post('/api/emission/generate', async (req, res) => {
     });
   } catch (err) {
     console.error('Emission generate error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Impossible de générer l'émission" });
   }
+});
+
+// Unknown API routes and failures answer in JSON, which the client can read
+// (Express would otherwise send an HTML page).
+app.use('/api', (req, res) => res.status(404).json({ error: 'Route inconnue' }));
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = err.status || err.statusCode || 500;
+  if (status >= 500) console.error(err);
+  res.status(status).json({
+    error: status === 413 ? 'Fichier trop volumineux' : status < 500 ? 'Requête invalide' : 'Erreur serveur',
+  });
 });
 
 app.listen(PORT, () => {

@@ -1,5 +1,6 @@
 // ═══ API HELPERS ═══════════════════════════════════════════════════
-// Thin wrappers around fetch that always parse JSON.
+// Thin wrappers around fetch that parse JSON and reject on HTTP errors, with
+// the server's message, so every caller's catch sees failures.
 // A 401 response means the session expired — reload to show the login screen.
 
 let _csrfToken = null;
@@ -13,9 +14,11 @@ function authHeaders() {
   return h;
 }
 
-function handle(r) {
+async function handle(r) {
   if (r.status === 401) { location.reload(); throw new Error('Session expirée'); }
-  return r.json();
+  const data = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(data?.error || `Erreur ${r.status}`);
+  return data;
 }
 
 export const api = {

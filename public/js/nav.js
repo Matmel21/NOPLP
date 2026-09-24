@@ -36,14 +36,13 @@ const ESCAPE_TARGETS = [
   ['#import-modal',                      el => el.remove()],
   ['#badges-modal',                      el => el.remove()],
   ['.pl-picker-popover',                 el => el.remove()],
-  ['.mastery-picker:not(.hidden)',       el => el.classList.add('hidden')],
   ['#emission-pick-modal:not(.hidden)',  () => document.getElementById('btn-close-emission-pick').click()],
   ['#episode-picker-modal:not(.hidden)', () => document.getElementById('btn-close-episode-picker').click()],
   ['#mode-modal:not(.hidden)',           () => document.getElementById('btn-close-mode').click()],
   ['#revision-modal:not(.hidden)',       () => document.getElementById('btn-close-revision').click()],
 ];
 
-const OVERLAY_SELECTOR = '.modal:not(.hidden), .fav-picker-modal, .app-dialog, .pl-picker-popover, .mastery-picker:not(.hidden)';
+const OVERLAY_SELECTOR = '.modal:not(.hidden), .fav-picker-modal, .app-dialog, .pl-picker-popover';
 
 function isTyping(el) {
   return el?.matches?.(

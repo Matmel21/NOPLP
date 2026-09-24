@@ -44,6 +44,8 @@ function showAuthOverlay(onAuthenticated) {
   // Switch between login and register modes
   toggle.addEventListener('click', () => {
     mode          = mode === 'login' ? 'register' : 'login';
+    // Lets password managers offer to generate / save a new password
+    document.getElementById('auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
     title.textContent  = mode === 'login' ? 'Connexion' : 'Créer un compte';
     submit.textContent = mode === 'login' ? 'Se connecter' : "S'inscrire";
     toggle.textContent = mode === 'login'

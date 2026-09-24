@@ -97,7 +97,9 @@ export function initTyping() {
   document.addEventListener('keydown', e => {
     if (document.getElementById('game-modal').classList.contains('hidden')) return;
     if (state.calibMode) return;
-    if (document.activeElement === document.getElementById('typing-input')) return;
+    // The answer box keeps focus after a blank: Space still means "continue"
+    // as long as there is nothing to answer on the current line.
+    if (document.activeElement === document.getElementById('typing-input') && state.activeLine >= 0) return;
 
     if (e.code === 'Space' || e.code === 'ArrowRight') {
       e.preventDefault();

@@ -25,18 +25,28 @@ export function initProfile(user) {
         if (authUser) authUser.avatar_url = avatar_url;
         renderAvatar(_user);
         showToast('Avatar mis à jour');
-      } catch { showToast('Erreur lors du téléchargement'); }
+      } catch (err) { showToast(err.message); }
+      e.target.value = '';   // choosing the same file again must fire "change" again
     };
     reader.readAsDataURL(file);
   });
 
   document.getElementById('btn-edit-username').addEventListener('click', async () => {
     const current = document.getElementById('profile-username').textContent;
-    const val = await promptDialog({ title: 'Modifier le pseudo', value: current, maxLength: 64, confirmLabel: 'Enregistrer' });
+    const val = await promptDialog({ title: 'Modifier le pseudo', value: current, maxLength: 24, confirmLabel: 'Enregistrer' });
     if (!val || val === current) return;
     api.put('/api/profile', { username: val.trim() })
-      .then(({ user }) => { _user = user; renderIdentity(user); showToast('Nom mis à jour'); })
-      .catch(() => showToast('Ce nom est déjà pris'));
+      .then(({ user }) => {
+        _user = user;
+        renderIdentity(user);
+        // The name is also shown in the nav bar and pre-filled in duels
+        const authUser = getCurrentUser();
+        document.dispatchEvent(new CustomEvent('user-renamed', { detail: { from: current, to: user.username } }));
+        if (authUser) authUser.username = user.username;
+        document.getElementById('nav-username').textContent = user.username;
+        showToast('Nom mis à jour');
+      })
+      .catch(err => showToast(err.message));
   });
 
   document.getElementById('btn-edit-bio').addEventListener('click', async () => {
@@ -46,20 +56,21 @@ export function initProfile(user) {
     if (val === null) return;
     api.put('/api/profile', { bio: val.trim() })
       .then(({ user }) => { _user = user; renderIdentity(user); showToast('Bio mise à jour'); })
-      .catch(() => showToast('Erreur'));
+      .catch(err => showToast(err.message));
   });
 }
 
 // ── Load ──────────────────────────────────────────────────────────
 
 export async function loadProfile() {
-  const [data, actData] = await Promise.all([
-    api.get('/api/profile'),
-    api.get('/api/profile/activity'),
-  ]);
+  let data, actData;
+  try {
+    [data, actData] = await Promise.all([api.get('/api/profile'), api.get('/api/profile/activity')]);
+  } catch (err) { showToast(err.message); return; }
   _user = data.user;
   renderAvatar(data.user);
   renderIdentity(data.user);
+  renderLevel(data.level);
   renderStats(data);
   renderWeek(actData);
   renderMasteryDonuts(data);
@@ -100,18 +111,41 @@ function renderIdentity(user) {
   bioEl.classList.toggle('profile-bio-empty', !user.bio);
 }
 
+// ── Level ─────────────────────────────────────────────────────────
+
+const fr = n => Number(n || 0).toLocaleString('fr-FR');
+
+function renderLevel(level) {
+  if (!level) return;
+  const span  = level.nextLevel - level.levelStart;
+  const inLvl = level.xp - level.levelStart;
+  const next  = level.nextTitle
+    ? `<span class="profile-level-next">${esc(level.nextTitle.title)} au niveau ${level.nextTitle.level}</span>`
+    : '';
+  document.getElementById('profile-level').innerHTML = `
+    <div class="hero-level">
+      <span class="level-chip">Niveau ${level.level}</span>
+      <span class="level-title">${esc(level.title)}</span>
+      ${next}
+    </div>
+    <div class="xp-row">
+      <div class="xp-bar"><div class="xp-fill" style="--w:${Math.round(inLvl / span * 100)}%"></div></div>
+      <span class="xp-text">${fr(inLvl)} / ${fr(span)} XP</span>
+    </div>`;
+}
+
 // ── Key stats ─────────────────────────────────────────────────────
 
 function renderStats(data) {
   const items = [
-    { label: 'Chansons jouées',   value: data.played },
-    { label: 'Émissions jouées',  value: data.emissions },
-    { label: 'Apprises',          value: data.maitrisee },
-    { label: 'Taux de réussite',  value: (data.successRate ?? 0) + '%' },
+    { label: 'Chansons jouées',  value: fr(data.played) },
+    { label: 'Émissions jouées', value: fr(data.emissions) },
+    { label: 'Clochettes',       value: fr(data.bells) },
+    { label: 'Gains en finale',  value: `${fr(data.finalWinnings)} €`, cls: 'gold' },
   ];
   document.getElementById('profile-stats').innerHTML = items.map(i => `
     <div class="profile-stat-card">
-      <div class="profile-stat-value">${i.value ?? 0}</div>
+      <div class="profile-stat-value${i.cls ? ' ' + i.cls : ''}">${i.value}</div>
       <div class="profile-stat-label">${i.label}</div>
     </div>`).join('');
 }

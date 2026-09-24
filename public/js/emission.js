@@ -1,7 +1,7 @@
 // ═══ EMISSION — mode émission NOPLR ════════════════════════════════
 import { state }      from './state.js';
 import { api }        from './api.js';
-import { esc, confirmDialog } from './utils.js';
+import { esc, confirmDialog, showToast } from './utils.js';
 import { startGame }  from './game.js';
 
 // ── Module-level emission state ───────────────────────────────────
@@ -18,6 +18,7 @@ let _duelNames          = ['', ''];  // [player1 name, player2 name]
 let _revealNext         = false;     // play the category reveal on the next render
 let _shownScores        = [0, 0];    // scores as last displayed, to detect updates
 let _saved              = false;     // finished emission already recorded
+let _token              = null;      // one-time id from /generate, required to record the result
 
 const SOURCE_LABEL = {
   real:      'Vraies catégories',
@@ -165,6 +166,10 @@ export function renderEmissionBoard() {
     _saved = true;
     api.post('/api/emission/complete', {
       source: emissionSource, mode: playerMode, score: scores[0], oppScore: playerMode === 'duel' ? scores[1] : null,
+      token: _token,
+    }).then(({ xp }) => {
+      if (xp?.leveledUp)   showToast(`Niveau ${xp.level.level} atteint : ${xp.level.title} !`);
+      else if (xp?.gained) showToast(`Émission terminée · +${xp.gained} XP`);
     }).catch(() => {});
   }
 
@@ -400,15 +405,17 @@ function closePick() {
 // ── Game launch ───────────────────────────────────────────────────
 
 async function startEmissionGame(songId, level) {
-  const data = await api.get('/api/songs/' + encodeURIComponent(songId));
-  state.song = data;
+  try { state.song = await api.get('/api/songs/' + encodeURIComponent(songId)); }
+  catch (err) { showToast(err.message); currentPlayingLevel = null; return; }
   startGame('normal', level, 0, 'classic');
 }
 
 async function startMcGame() {
   if (!emissionData?.mcSong) return;
   currentPlayingLevel = null;
-  const data = await api.get('/api/songs/' + encodeURIComponent(emissionData.mcSong.id));
+  let data;
+  try { data = await api.get('/api/songs/' + encodeURIComponent(emissionData.mcSong.id)); }
+  catch (err) { showToast(err.message); return; }
   state.song = data;
   const startSrc = data.karaoke_url?.trim() ? 'karaoke' : 'classic';
   startGame('mc', 20, 0, startSrc);
@@ -465,6 +472,7 @@ async function generateEmission(source = 'real', episodeId = null) {
     if (episodeId) body.episodeId = episodeId;
     const data = await api.post('/api/emission/generate', body);
     emissionData = data;
+    _token       = data.token;
     emissionData.pairs = (emissionData.pairs || []).map(p => p ? { ...p, played: false } : null);
     if (emissionData.mcSong) emissionData.mcSong.played = false;
     playedCount   = 0;
@@ -490,6 +498,10 @@ async function generateEmission(source = 'real', episodeId = null) {
 export function initEmission(user) {
   _user = user;
   if (user?.username) _duelNames[0] = user.username;
+  // Keep player 1 in sync when the pseudo is changed from the profile
+  document.addEventListener('user-renamed', e => {
+    if (_duelNames[0] === e.detail.from) _duelNames[0] = e.detail.to;
+  });
 
   document.getElementById('btn-close-emission-pick')
     .addEventListener('click', closePick);

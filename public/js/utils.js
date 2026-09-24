@@ -1,26 +1,29 @@
 // ═══ UTILITIES ═════════════════════════════════════════════════════
 
-/** Escape HTML special characters for safe innerHTML insertion. */
+/** Escape HTML special characters for safe innerHTML insertion (text and quoted attributes). */
 export function esc(str) {
-  if (!str) return '';
+  if (str == null) return '';
   return String(str)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-/** Normalise a string for loose answer comparison (accents, apostrophes, case). */
+/**
+ * Normalise a string for loose answer comparison: case, accents, ligatures,
+ * typographic apostrophes and punctuation don't count — only the words do
+ * ("Gant de crin, geyser" = "gant de crin geyser", "l’été" = "l'ete").
+ */
 export function normalize(s) {
-  return s.toLowerCase().trim()
-    .replace(/[''`]/g, "'")
-    .replace(/[àâä]/g, 'a')
-    .replace(/[éèêë]/g, 'e')
-    .replace(/[îï]/g, 'i')
-    .replace(/[ôö]/g, 'o')
-    .replace(/[ùûü]/g, 'u')
-    .replace(/ç/g, 'c')
-    .replace(/\s+/g, ' ');
+  return String(s ?? '').toLowerCase()
+    .replace(/œ/g, 'oe').replace(/æ/g, 'ae')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[’‘`´ʼ]/g, "'")
+    .replace(/[^a-z0-9']+/g, ' ')
+    .replace(/\s*'\s*/g, "'")
+    .trim();
 }
 
 /** Format a timestamp in seconds as m:ss.s */
@@ -30,21 +33,12 @@ export function formatTime(t) {
   return `${m}:${s}`;
 }
 
-/** Score pill HTML (high / mid / low colour). */
-export function scorePill(score) {
-  if (score == null) return '—';
-  const cls = score >= 80 ? 'high' : score >= 50 ? 'mid' : 'low';
-  return `<span class="score-pill ${cls}">${score}%</span>`;
-}
-
-/** Full text label for a mastery level. Returns '' for unset/default. */
-export function masteryLabel(m) {
-  return { maitrisee: 'Apprise', revision: 'À revoir', prevue: 'En cours' }[m] || '';
-}
+/** Labels of the song statuses ("no status" has none). */
+export const MASTERY_LABEL = { maitrisee: 'Apprise', prevue: 'En cours', revision: 'À revoir' };
 
 /** Compact coloured text badge for a mastery level. Returns '' for unset/default. */
 export function masteryIcon(mastery) {
-  const label = { maitrisee: 'Apprise', revision: 'À revoir', prevue: 'En cours' }[mastery];
+  const label = MASTERY_LABEL[mastery];
   return label ? `<span class="mastery-mini ${mastery}">${label}</span>` : '';
 }
 

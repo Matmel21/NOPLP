@@ -9,11 +9,11 @@ export const state = {
   view: 'home',
 
   // Library filters
-  page: 0, limit: 50, search: '', artist: '', mastery: '', type: '', sort: '', playlist: null,
+  page: 0, limit: 50, search: '', mastery: '', type: '', sort: '', playlist: null,
 
   // Current song & game config
   song:        null,
-  gameMode:    'normal',   // 'normal' | 'mc' | 'finale'
+  gameMode:    'normal',   // 'normal' | 'mc' | 'finale' | 'revision'
   difficulty:  0,
   finaleStep:  0,          // index into FN_ROUNDS (0-4)
 
@@ -47,6 +47,11 @@ export const state = {
   // Revision queue
   revisionQueue:    [],
   revisionQueueIdx: -1,
+  quickPlay:        false,   // false, or the mode ('normal' | 'mc') a series plays without the mode modal
+
+  // Set by startGame's options
+  forcedPhrase: null,        // lyrics to hide instead of a random pick (daily challenge)
+  isChallenge:  false,       // this run is the daily challenge
 
   // Internal timers
   _autoAdvanceTimer: null,

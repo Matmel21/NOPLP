@@ -2,6 +2,7 @@
 import { state }          from './state.js';
 import { esc }            from './utils.js';
 import { buildLineHtml }  from './blanks.js';
+import { extractYtId }    from './youtube.js';
 
 // ── renderLyrics ────────────────────────────────────────────────────
 // Rebuilds the entire lyrics panel DOM. All lines start hidden;
@@ -68,11 +69,11 @@ export function showQueueLine(idx) {
       // MC: don't pause, don't ask for input — switch to karaoke if available
       clearTypingArea();
       if (state.mcVideoMode === 'karaoke' && state.ytPlayer && state.song?.karaoke_url) {
-        const m = state.song.karaoke_url.match(/(?:v=|youtu\.be\/|embed\/)([A-Za-z0-9_-]{11})/);
-        if (m) {
+        const videoId = extractYtId(state.song.karaoke_url);
+        if (videoId) {
           try {
             const t = state.ytPlayer.getCurrentTime?.() ?? 0;
-            state.ytPlayer.loadVideoById({ videoId: m[1], startSeconds: t });
+            state.ytPlayer.loadVideoById({ videoId, startSeconds: t });
           } catch (_) {}
         }
       }

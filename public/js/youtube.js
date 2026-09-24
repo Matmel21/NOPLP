@@ -1,6 +1,7 @@
 // ═══ YOUTUBE SYNC ══════════════════════════════════════════════════
 import { state }       from './state.js';
 import { advanceLine } from './lyrics.js';
+import { esc }         from './utils.js';
 
 // ── extractYtId ─────────────────────────────────────────────────────
 
@@ -43,7 +44,9 @@ function showYtError(msg, ytUrl) {
     overlay.id = 'yt-error-overlay';
     document.querySelector('.yt-container')?.appendChild(overlay);
   }
-  overlay.innerHTML = `<span>${msg}</span><a href="${ytUrl}" target="_blank" rel="noopener">Regarder sur YouTube →</a>`;
+  // Only real web links: the URL comes from the catalogue, never trust it as HTML
+  const href = /^https?:\/\//i.test(ytUrl) ? ytUrl : 'https://www.youtube.com';
+  overlay.innerHTML = `<span>${esc(msg)}</span><a href="${esc(href)}" target="_blank" rel="noopener">Regarder sur YouTube →</a>`;
   overlay.classList.remove('hidden');
 }
 

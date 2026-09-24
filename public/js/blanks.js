@@ -113,7 +113,9 @@ export function parseBlanks() {
       const bj      = JSON.parse(blanks_json);
       const phrases = bj[String(diff)] || bj[diff] || [];
       if (phrases.length > 0) {
-        const chosen = phrases[Math.floor(Math.random() * phrases.length)];
+        const chosen = phrases.includes(state.forcedPhrase)
+          ? state.forcedPhrase
+          : phrases[Math.floor(Math.random() * phrases.length)];
         blanksMap[normalize(chosen)] = chosen;
       }
     } catch (_) {}

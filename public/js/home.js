@@ -1,7 +1,7 @@
 // ═══ HOME VIEW — gamified dashboard ════════════════════════════════
 import { api }                           from './api.js';
 import { showView }                      from './nav.js';
-import { esc, showToast, promptDialog }  from './utils.js';
+import { esc, showToast, promptDialog, MASTERY_LABEL } from './utils.js';
 import { state }                         from './state.js';
 import { presetLibrary, refreshPlaylists } from './library.js';
 
@@ -10,7 +10,6 @@ let _data     = null;
 let _revMode  = null;   // custom series modal
 let _revCount = 5;
 
-const MASTERY_LABEL = { maitrisee: 'Apprise', prevue: 'En cours', revision: 'À revoir' };
 const SOURCE_LABEL  = { real: 'Vraies catégories', episode: 'Épisode rejoué', generated: 'Catégories inventées' };
 const fr = n => Number(n || 0).toLocaleString('fr-FR');
 const plural = (n, word) => `${fr(n)} ${word}${n > 1 ? 's' : ''}`;
@@ -140,7 +139,7 @@ function continueHtml({ queue }) {
       </section>`;
   }
   const n = queue.next;
-  const last = n.last_played ? `Dernier essai : ${n.last_score ?? 0} % · ${ago(n.last_played)}` : 'Jamais jouée';
+  const last = n.last_played ? `Dernière révision ${ago(n.last_played)}` : 'Jamais jouée';
   return `
     <section class="home-card home-continue">
       ${head}
@@ -150,7 +149,7 @@ function continueHtml({ queue }) {
         <span class="card-meta">${last}</span>
       </div>
       <div class="card-actions">
-        <button class="home-btn" data-action="play" data-id="${esc(n.id)}">&#9654; Réviser maintenant</button>
+        <button class="home-btn" data-action="quick" data-id="${esc(n.id)}">&#9654; Réviser maintenant</button>
         <button class="home-btn ghost" data-action="launch" data-source="queue">Série rapide · ${Math.min(10, queue.total)}</button>
         <button class="home-link" data-action="custom">Personnaliser…</button>
       </div>
@@ -172,10 +171,10 @@ function challengeHtml({ challenge: c }) {
         <span class="xp-tag">+${c.xp} XP</span>
       </div>
       ${pillHtml(c)}
-      <div class="card-meta">Sortie ${fr(c.aired_12m)} fois ces 12 derniers mois · réussis-la à ${c.pass} % ou plus.</div>
+      <div class="card-meta">Catégorie ${c.level} pts · sortie ${fr(c.aired_12m)} fois ces 12 derniers mois · le même défi pour tous les joueurs.</div>
       ${c.completed
         ? '<div class="challenge-done">&#10003; Défi relevé ! Nouveau défi demain.</div>'
-        : `<div class="card-actions"><button class="home-btn gold" data-action="play" data-id="${esc(c.id)}">Relever le défi</button></div>`}
+        : '<div class="card-actions"><button class="home-btn gold" data-action="challenge">Relever le défi</button></div>'}
     </section>`;
 }
 
@@ -194,7 +193,6 @@ function coverageHtml({ coverage: c }) {
       <div class="cov-right">
         <div class="card-head">
           <span class="home-lbl">À apprendre en priorité</span>
-          <button class="home-link" data-action="open-smart" data-type="year_todo">Tout voir</button>
         </div>
         ${c.priority.map(p => `
           <button class="prio-row" data-action="play" data-id="${esc(p.id)}">
@@ -220,7 +218,6 @@ function playlistsHtml({ playlists, smart }) {
     <section class="home-section">
       <div class="card-head">
         <span class="home-lbl">Mes playlists</span>
-        <button class="home-link" data-action="library">Bibliothèque &#8594;</button>
       </div>
       <div class="pl-grid">
         ${playlists.map(pl => card({
@@ -229,8 +226,6 @@ function playlistsHtml({ playlists, smart }) {
           open: `data-action="open-playlist" data-id="${pl.id}"`,
           launch: `data-action="launch" data-source="playlist" data-id="${pl.id}"`,
         })).join('')}
-        ${card({ name: 'Tubes de l’année à apprendre', meta: `Liste auto · ${plural(smart.year_todo, 'chanson')}`, empty: !smart.year_todo,
-                 open: 'data-action="open-smart" data-type="year_todo"', launch: 'data-action="launch" data-source="year_todo"' })}
         ${card({ name: 'Même chanson', meta: `Liste auto · ${plural(smart.mc, 'chanson')}`, empty: !smart.mc,
                  open: 'data-action="open-smart" data-type="mc"', launch: 'data-action="launch" data-source="mc"' })}
         <button class="pl-new" data-action="new-playlist">+ Nouvelle playlist</button>
@@ -262,11 +257,10 @@ function badgesHtml({ badges }) {
 }
 
 function recentHtml({ recent }) {
-  const scoreTag = s => `<span class="score-pill ${s >= 80 ? 'high' : s >= 50 ? 'mid' : 'low'}">${s} %</span>`;
   const rows = recent.map(r => r.type === 'song'
     ? `<button class="recent-row" data-action="play" data-id="${esc(r.id)}">
          <span class="recent-title">${esc(r.title)} <span>· ${esc(r.artist)}</span></span>
-         <span class="recent-when">${ago(r.at)}</span>${scoreTag(r.score ?? 0)}
+         <span class="recent-when">${ago(r.at)}</span>
        </button>`
     : `<div class="recent-row">
          <span class="recent-title">Émission <span>· ${SOURCE_LABEL[r.source] || ''}${r.mode === 'duel' ? ' · 1 contre 1' : ''}</span></span>
@@ -288,6 +282,8 @@ async function onHomeClick(e) {
   const { action, id, source, type } = el.dataset;
   switch (action) {
     case 'play':          return openSong(id);
+    case 'quick':         return quickSong(id);
+    case 'challenge':     return startChallenge();
     case 'launch':        return startSeries(source, id);
     case 'custom':        return openRevisionModal();
     case 'library':       return showView('library');
@@ -300,8 +296,38 @@ async function onHomeClick(e) {
 
 async function openSong(id) {
   state.revisionQueue = [];
+  state.quickPlay = false;
   const { openModeModal } = await import('./game.js');
   openModeModal(id);
+}
+
+// Straight into the game: random points category, no mode modal
+async function quickSong(id) {
+  state.revisionQueue = [];
+  state.quickPlay = false;
+  const { quickStart } = await import('./game.js');
+  quickStart(id).catch(err => showToast(err.message));
+}
+
+// Same song, category and missing lyrics for every player
+async function startChallenge() {
+  const c = _data?.challenge;
+  if (!c) return;
+  state.revisionQueue = [];
+  state.quickPlay = false;
+  const { quickStart } = await import('./game.js');
+  quickStart(c.id, { level: c.level, phrase: c.phrase, challenge: true })
+    .catch(err => showToast(err.message));
+}
+
+// A series plays song after song without asking for a category each time.
+// "Même chanson" series are played as MC rounds.
+async function playQueue(songs, mode = 'normal') {
+  state.revisionQueue    = songs;
+  state.revisionQueueIdx = 0;
+  state.quickPlay        = mode;
+  const { quickStart } = await import('./game.js');
+  await quickStart(songs[0].id, { mode });
 }
 
 async function startSeries(source, id) {
@@ -310,19 +336,18 @@ async function startSeries(source, id) {
   try {
     const songs = await api.get('/api/revision-queue?' + params);
     if (!songs.length) { showToast('Aucune chanson à réviser ici'); return; }
-    state.revisionQueue    = songs;
-    state.revisionQueueIdx = 0;
-    const { openModeModal } = await import('./game.js');
-    openModeModal(songs[0].id);
-  } catch { showToast('Erreur lors du chargement'); }
+    await playQueue(songs, source === 'mc' ? 'mc' : 'normal');
+  } catch (err) { showToast(err.message); }
 }
 
 async function createPlaylist() {
   const name = await promptDialog({ title: 'Nouvelle playlist', placeholder: 'Nom de la playlist', maxLength: 60, confirmLabel: 'Créer' });
   if (!name) return;
-  await api.post('/api/playlists', { name });
-  await refreshPlaylists();
-  loadHome();
+  try {
+    await api.post('/api/playlists', { name });
+    await refreshPlaylists();
+    loadHome();
+  } catch (err) { showToast(err.message); }
 }
 
 function openBadges() {
@@ -387,11 +412,8 @@ async function startCustomRevision() {
       showToast(`Aucune chanson ${labels[_revMode] || ''} trouvée`);
       return;
     }
-    state.revisionQueue    = songs;
-    state.revisionQueueIdx = 0;
-    const { openModeModal } = await import('./game.js');
-    openModeModal(songs[0].id);
-  } catch { showToast('Erreur lors du chargement'); }
+    await playQueue(songs, _revMode === 'mc' ? 'mc' : 'normal');
+  } catch (err) { showToast(err.message); }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────

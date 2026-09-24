@@ -41,16 +41,24 @@ body {
 }
 
 /* Glossy pill surface — used by tags, badges, pills and primary buttons */
-.gloss,
-.song-card, .mastery-tag, .mastery-mini, .score-pill, .type-badge,
-.pl-chip, .playlist-chip, .btn-primary, .auth-btn, .btn-emission-start,
-.pmode-btn.active, .mode-btn-mc, .ep-pick-btn:hover {
+.song-card,
+.mastery-mini,
+.score-pill,
+.pl-chip,
+.btn-primary,
+.auth-btn,
+.btn-emission-start,
+.pmode-btn.active,
+.mode-btn-mc,
+.ep-pick-btn:hover {
   position: relative;
   isolation: isolate;
 }
-.gloss::before,
-.song-card::before, .pl-chip::before, .playlist-chip::before,
-.btn-primary::before, .auth-btn::before, .btn-emission-start::before {
+.song-card::before,
+.pl-chip::before,
+.btn-primary::before,
+.auth-btn::before,
+.btn-emission-start::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -202,7 +210,6 @@ option { background: var(--bg2); color: var(--text); }
   font-size: 14px;
 }
 
-#artist-filter,
 #mastery-filter,
 #type-filter,
 #sort-filter {
@@ -216,7 +223,6 @@ option { background: var(--bg2); color: var(--text); }
   color: var(--text);
   transition: border-color .15s;
 }
-#artist-filter:focus,
 #mastery-filter:focus,
 #type-filter:focus,
 #sort-filter:focus { border-color: var(--accent); }
@@ -231,17 +237,29 @@ option { background: var(--bg2); color: var(--text); }
   margin-bottom: 24px;
 }
 
+/* Deep navy glass: darker than the generic gloss so cards sit in the theme,
+   with a sharp top sheen and rim light so they read glossy, not matte. */
 .song-card {
-  background: var(--gloss-bg);
-  border: 1px solid var(--border);
+  --card-shadow: inset 0 1px 0 rgba(255,255,255,.28), inset 0 -10px 24px rgba(0,8,30,.45), 0 6px 18px rgba(0,12,45,.5);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,.03) 48%, rgba(255,255,255,0) 52%),
+    linear-gradient(165deg, #1d59a6 0%, #133f80 42%, #0b2858 100%);
+  border: 1px solid rgba(125,185,255,.32);
   border-radius: var(--radius-lg);
   padding: 18px;
   cursor: pointer;
-  transition: all .2s;
+  transition: transform .2s, border-color .2s, box-shadow .2s;
   overflow: hidden;
-  box-shadow: var(--gloss-shadow);
+  box-shadow: var(--card-shadow);
 }
-.song-card:hover { border-color: var(--border2); transform: translateY(-2px); box-shadow: var(--gloss-shadow), 0 8px 22px rgba(0,10,40,.5); }
+.song-card::before {
+  background: radial-gradient(90% 70% at 20% 0%, rgba(120,190,255,.22), transparent 70%);
+}
+.song-card:hover {
+  border-color: rgba(160,210,255,.7);
+  transform: translateY(-2px);
+  box-shadow: var(--card-shadow), 0 0 0 1px rgba(46,143,255,.25), 0 10px 26px rgba(0,20,70,.6), 0 0 22px rgba(46,143,255,.28);
+}
 
 .song-card-title {
   font-weight: 600;
@@ -326,12 +344,6 @@ option { background: var(--bg2); color: var(--text); }
   cursor: not-allowed;
   text-decoration: line-through;
 }
-.song-card-score {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--green);
-}
-
 /* Contextual stat badge — reflects the active library sort */
 .song-card-stat {
   display: inline-block;
@@ -369,122 +381,7 @@ option { background: var(--bg2); color: var(--text); }
 .pagination button:disabled { opacity: 0.3; cursor: not-allowed; }
 #page-info { font-size: 13px; color: var(--text3); }
 
-/* ═══ DASHBOARD ══════════════════════════════════════════════════ */
-.dashboard-grid { display: flex; flex-direction: column; gap: 28px; }
-
-.stat-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
-
-.stat-card {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 20px;
-}
-.stat-card-label {
-  font-size: 12px;
-  color: var(--text3);
-  text-transform: uppercase;
-  letter-spacing: .8px;
-  margin-bottom: 8px;
-}
-.stat-card-value {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 36px;
-  color: var(--accent);
-  line-height: 1;
-}
-.stat-card-sub { font-size: 12px; color: var(--text2); margin-top: 4px; }
-
-.dash-section {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 24px;
-}
-.dash-section h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: var(--text); }
-
-/* Dashboard search row */
-.dash-search-row {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-.dash-filter-input {
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 8px 12px;
-  font-size: 13px;
-  outline: none;
-  color: var(--text);
-  flex: 1;
-  min-width: 160px;
-  transition: border-color .15s;
-}
-.dash-filter-input:focus { border-color: var(--accent); }
-.dash-filter-select {
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 8px 12px;
-  font-size: 13px;
-  outline: none;
-  color: var(--text);
-  cursor: pointer;
-  transition: border-color .15s;
-}
-.dash-filter-select:focus { border-color: var(--accent); }
-
-.dash-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.dash-table th {
-  text-align: left;
-  color: var(--text3);
-  font-weight: 500;
-  padding: 0 12px 10px;
-  border-bottom: 1px solid var(--border);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: .6px;
-}
-.dash-table td {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text);
-  vertical-align: middle;
-}
-.dash-table tr:last-child td { border-bottom: none; }
-.dash-table tr:hover td { background: var(--bg3); }
-
-/* Mastery legend */
-.mastery-legend-section {}
-.mastery-legend {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.mastery-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 12px;
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 700;
-  font-family: var(--font-display);
-  text-transform: uppercase;
-  letter-spacing: .3px;
-  border: 1px solid var(--border);
-  background: var(--gloss-bg);
-  color: #fff;
-  box-shadow: var(--gloss-shadow);
-}
-.mastery-tag.maitrisee     { background: var(--m-maitrisee); }
-.mastery-tag.revision      { background: var(--m-revision); }
-.mastery-tag.prevue        { background: var(--m-prevue); }
-.mastery-tag.non_maitrisee { background: var(--m-non); }
-.mastery-tag.non_revisee   { background: rgba(255,255,255,.06); color: var(--text3); box-shadow: none; }
+/* ═══ STATUS BADGES & PILLS ═════════════════════════════════════ */
 
 /* Compact inline mastery badge used in song cards (masteryIcon() in utils.js) */
 .mastery-mini {
@@ -503,12 +400,6 @@ option { background: var(--bg2); color: var(--text); }
 .mastery-mini.revision  { background: var(--m-revision); }
 .mastery-mini.prevue    { background: var(--m-prevue); }
 
-/* Progress bar */
-.progress-bar-wrap { display: flex; align-items: center; gap: 8px; }
-.progress-bar { flex: 1; height: 5px; background: var(--bg3); border-radius: 3px; overflow: hidden; }
-.progress-bar-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width .4s; }
-.progress-bar-label { font-size: 11px; color: var(--text3); min-width: 32px; text-align: right; }
-
 /* Score pills */
 .score-pill {
   display: inline-block;
@@ -519,9 +410,6 @@ option { background: var(--bg2); color: var(--text); }
   border: 1px solid var(--border);
   color: #fff;
 }
-.score-pill.high { background: linear-gradient(180deg, #4fcf94 0%, #1e7d47 100%); }
-.score-pill.mid  { background: linear-gradient(180deg, #f5cf7a 0%, #b8862a 100%); }
-.score-pill.low  { background: linear-gradient(180deg, #ff8a7a 0%, #b23a2b 100%); }
 
 /* ═══ MODE MODAL ═════════════════════════════════════════════════ */
 .mode-panel {
@@ -1093,120 +981,6 @@ option { background: var(--bg2); color: var(--text); }
   flex-shrink: 0;
 }
 
-/* ─── Mastery progress bar ──────────────────────────────────────── */
-.mastery-progress-row { margin-bottom: 14px; }
-.mastery-bar {
-  display: flex;
-  height: 10px;
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--bg3);
-  margin-bottom: 10px;
-}
-.mastery-bar-seg { height: 100%; transition: width .4s; }
-.mastery-bar-seg.maitrisee     { background: var(--green); }
-.mastery-bar-seg.revision      { background: var(--blue); }
-.mastery-bar-seg.prevue        { background: var(--accent2); }
-.mastery-bar-seg.non_maitrisee { background: var(--red); }
-.mastery-bar-seg.non_revisee   { background: rgba(255,255,255,.06); }
-.mastery-bar-labels { display: flex; gap: 8px; flex-wrap: wrap; }
-.dash-hint { font-size: 12px; color: var(--text3); margin-top: 12px; font-style: italic; }
-
-/* ─── Mastery tag clickable ─────────────────────────────────────── */
-.mastery-tag.mastery-clickable {
-  cursor: pointer;
-  transition: filter .15s, transform .1s;
-}
-.mastery-tag.mastery-clickable:hover { filter: brightness(1.25); transform: scale(1.05); }
-
-/* ─── Mastery picker popover ────────────────────────────────────── */
-.mastery-picker {
-  position: absolute;
-  z-index: 500;
-  background: var(--bg2);
-  border: 1px solid var(--border2);
-  border-radius: var(--radius);
-  padding: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  box-shadow: 0 8px 24px rgba(0,0,0,.5);
-  min-width: 190px;
-}
-.mastery-pick-btn {
-  text-align: left;
-  padding: 8px 12px;
-  border-radius: 6px;
-  font-size: 13px;
-  color: var(--text2);
-  transition: background .12s;
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-.mastery-pick-btn:hover  { background: var(--bg3); color: var(--text); }
-.mastery-pick-btn.current { color: var(--accent); background: rgba(58,123,213,.08); font-weight: 600; }
-
-/* ─── Playlist section ──────────────────────────────────────────── */
-.playlist-count-badge { font-size: 13px; color: var(--text3); font-weight: 400; margin-left: 4px; }
-
-.dash-section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-.dash-section-header h2 { margin-bottom: 0; }
-
-.btn-play-random {
-  padding: 6px 14px;
-  background: rgba(58,123,213,.12);
-  border: 1px solid rgba(58,123,213,.35);
-  border-radius: var(--radius);
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 600;
-  transition: all .15s;
-  white-space: nowrap;
-}
-.btn-play-random:hover { background: rgba(58,123,213,.22); border-color: rgba(58,123,213,.6); }
-.playlist-empty { font-size: 13px; color: var(--text3); padding: 12px 0; }
-.playlist-chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.playlist-chip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 10px 6px 12px;
-  cursor: pointer;
-  transition: border-color .15s;
-}
-.playlist-chip:hover { border-color: var(--accent); }
-.playlist-chip-title  { font-size: 13px; font-weight: 600; color: var(--text); }
-.playlist-chip-artist { font-size: 12px; color: var(--accent); }
-.playlist-chip-remove {
-  font-size: 11px; color: var(--text3); padding: 2px 5px; border-radius: 4px;
-  background: none; border: none; cursor: pointer; flex-shrink: 0; transition: color .12s;
-}
-.playlist-chip-remove:hover { color: var(--red); }
-
-/* ─── Type badges + playlist toggle ────────────────────────────── */
-.type-badge {
-  display: inline-block; font-size: 10px; font-weight: 700;
-  padding: 1px 6px; border-radius: 4px; letter-spacing: .4px;
-}
-.type-badge.mc { background: linear-gradient(180deg, #6fdcf0 0%, #147d95 100%); color: #fff; }
-.type-badge.fn { background: linear-gradient(180deg, #f5cf7a 0%, #b8862a 100%); color: #fff; }
-
-.playlist-toggle {
-  background: none; border: 1px solid var(--border); border-radius: 6px;
-  padding: 3px 8px; font-size: 13px; color: var(--text3); cursor: pointer; transition: all .15s;
-}
-.playlist-toggle:hover  { border-color: var(--accent); color: var(--accent); }
-.playlist-toggle.active { border-color: var(--accent); color: var(--accent); background: rgba(58,123,213,.08); }
-
 /* ═══ EMISSION ═══════════════════════════════════════════════════ */
 
 /* Empty / loading / error states */
@@ -1248,10 +1022,7 @@ option { background: var(--bg2); color: var(--text); }
   min-width: 280px;
 }
 .emission-source-choice .btn-emission-start { width: 100%; }
-.emission-src-alt {
-  margin-top: 2px;
-  opacity: .8;
-}
+
 .emission-source-hint {
   font-size: 12.5px;
   color: var(--text3);
@@ -2175,7 +1946,14 @@ button.recent-row:hover { background: rgba(255,255,255,.06); }
   line-height: 1;
   margin-bottom: 6px;
 }
+.profile-stat-value.gold { color: var(--accent2); }
 .profile-stat-label { font-size: 13px; color: var(--text2); }
+
+/* Level + XP bar under the username (reuses the home hero chip and bar) */
+.profile-level { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; width: 380px; max-width: 100%; }
+.profile-level .hero-level { flex-wrap: wrap; }
+.profile-level:empty { display: none; }
+.profile-level-next { font-size: 12px; color: var(--text3); }
 
 /* Section wrappers */
 .profile-section {
@@ -2195,23 +1973,6 @@ button.recent-row:hover { background: rgba(255,255,255,.06); }
   margin-bottom: 16px;
 }
 .profile-section-header .profile-section-title { margin-bottom: 0; }
-
-/* Activity chart */
-.activity-chart {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 60px;
-}
-.activity-bar {
-  flex: 1;
-  background: var(--bg3);
-  border-radius: 2px;
-  min-height: 2px;
-  transition: background .15s;
-}
-.activity-bar.active { background: var(--accent); opacity: .8; }
-.activity-bar:hover  { opacity: 1 !important; }
 
 /* Top artists / songs */
 .profile-tops {
@@ -2488,7 +2249,6 @@ button.recent-row:hover { background: rgba(255,255,255,.06); }
   transition: all .15s; flex-shrink: 0;
 }
 .btn-new-playlist:hover { border-color: var(--accent); color: var(--accent); }
-
 
 /* ═══ WEEKLY STREAK TIMELINE ═════════════════════════════════════ */
 
@@ -2882,15 +2642,18 @@ button.recent-row:hover { background: rgba(255,255,255,.06); }
 }
 
 /* ═══ SONG TITLE / ARTIST — Bahnschrift Bold, uppercase everywhere ═══ */
-.song-card-title, .song-card-artist,
-.emission-song-title, .emission-song-artist,
-.mode-song-title, .mode-song-artist,
-.gm-title, .gm-artist,
-.home-recent-title, .home-recent-artist,
-.home-playlist-chip-title, .home-playlist-chip-artist,
-.playlist-chip-title, .playlist-chip-artist,
-.top-bar-label, .top-artist,
-.fav-picker-title, .fav-picker-artist,
+.song-card-title,
+.song-card-artist,
+.emission-song-title,
+.emission-song-artist,
+.mode-song-title,
+.mode-song-artist,
+.gm-title,
+.gm-artist,
+.top-bar-label,
+.top-artist,
+.fav-picker-title,
+.fav-picker-artist,
 .pl-chip-name {
   font-family: var(--font-display);
   font-weight: 700;
@@ -2931,8 +2694,8 @@ button.recent-row:hover { background: rgba(255,255,255,.06); }
 .sq.current { color: #fff; border-color: #fff; box-shadow: 0 0 0 1px rgba(255,255,255,.35); }
 .song-card.status-flash { animation: status-flash .35s ease-out; }
 @keyframes status-flash {
-  0%   { box-shadow: var(--gloss-shadow), 0 0 0 0 rgba(160,215,255,.8); }
-  100% { box-shadow: var(--gloss-shadow), 0 0 0 10px rgba(160,215,255,0); }
+  0%   { box-shadow: var(--card-shadow), 0 0 0 0 rgba(160,215,255,.8); }
+  100% { box-shadow: var(--card-shadow), 0 0 0 10px rgba(160,215,255,0); }
 }
 
 /* Import button + keyboard hint */
