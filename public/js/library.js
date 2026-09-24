@@ -43,7 +43,7 @@ function sortStatBadge(s) {
       return { val: total, cls: '', text: () => `${pct}% choisie (${s.chosen_count}/${total})` };
     })(),
   };
-  const e = map[state.sort || { mal_aimees: 'mal_aimees', year_todo: 'aired_desc' }[state.type] || ''];
+  const e = map[state.sort || { mal_aimees: 'mal_aimees' }[state.type] || ''];
   if (!e || !e.val) return '';
   return `<div class="song-card-stat ${e.cls}">${e.text(e.val)}</div>`;
 }
@@ -61,7 +61,6 @@ function renderSongGrid(songs, total) {
 
   grid.innerHTML = songs.map(s => {
     const hasVideo  = s.youtube_url?.trim();
-    const best      = s.attempts > 0 && s.best_score != null ? `<span class="song-card-score">${s.best_score}%</span>` : '';
     const alts      = s.alt_versions || [];
     const altBadge  = alts.length
       ? `<span class="song-versions-badge" title="${alts.map(v => esc(v.artist) + (v.year ? ' - ' + v.year : '')).join('\n')}">${alts.length + 1} versions</span>`
@@ -70,7 +69,7 @@ function renderSongGrid(songs, total) {
     return `
       <div class="song-card" data-id="${s.id}" data-mastery="${s.mastery || ''}"${altData}>
         <div class="song-card-actions">
-          <button class="song-star${s.in_default ? ' on' : ''}" data-id="${esc(s.id)}" title="Playlist par défaut"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3L2.9 9.5l6.3-.9z"/></svg></button>
+          <button class="song-star${s.in_default ? ' on' : ''}" data-id="${esc(s.id)}" title="Favoris"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3L2.9 9.5l6.3-.9z"/></svg></button>
           <button class="song-pl-btn" data-id="${esc(s.id)}" title="Choisir une playlist"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
         </div>
         <div class="song-card-title">${esc(s.title)}${altBadge}</div>
@@ -79,7 +78,6 @@ function renderSongGrid(songs, total) {
         ${!hasVideo ? '<div class="song-card-unavailable">Clip indisponible</div>' : ''}
         <div class="song-card-meta">
           ${masteryIcon(s.mastery)}
-          ${best}
           ${quickStatusHtml(s.mastery)}
         </div>
       </div>`;

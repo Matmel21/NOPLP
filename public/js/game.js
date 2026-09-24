@@ -272,11 +272,14 @@ export function nextFinaleRound() {
 // times finishGame or closeGame are called (sync loop, YT auto-advance, etc.)
 let _attemptSaved = false;
 
+// Resolves to the server's XP result ({ gained, level, leveledUp }) or null
 async function saveAttempt() {
-  if (_attemptSaved || !state.song) return;
+  if (_attemptSaved || !state.song) return null;
   _attemptSaved = true;
-  try { await api.post('/api/songs/' + encodeURIComponent(state.song.id) + '/attempt', { score: state.score }); }
-  catch (_) {}
+  try {
+    const res = await api.post('/api/songs/' + encodeURIComponent(state.song.id) + '/attempt', { score: state.score });
+    return res.xp || null;
+  } catch (_) { return null; }
 }
 
 export async function finishGame() {
@@ -284,7 +287,9 @@ export async function finishGame() {
   clearTypingArea();
   document.getElementById('typing-area').classList.add('hidden');
   showToast(`Terminé ! Score : ${state.score}%`);
-  await saveAttempt();
+  const xp = await saveAttempt();
+  if (xp?.leveledUp)  showToast(`Niveau ${xp.level.level} atteint : ${xp.level.title} !`);
+  else if (xp?.gained) showToast(`Terminé ! Score : ${state.score}% · +${xp.gained} XP`);
   // Show next-song button if we're in a revision queue with songs remaining
   const hasNext = state.revisionQueueIdx >= 0
     && state.revisionQueueIdx < state.revisionQueue.length - 1;

@@ -1,7 +1,7 @@
 // ═══ EMISSION — mode émission NOPLR ════════════════════════════════
 import { state }      from './state.js';
 import { api }        from './api.js';
-import { esc, confirmDialog } from './utils.js';
+import { esc, confirmDialog, showToast } from './utils.js';
 import { startGame }  from './game.js';
 
 // ── Module-level emission state ───────────────────────────────────
@@ -18,6 +18,7 @@ let _duelNames          = ['', ''];  // [player1 name, player2 name]
 let _revealNext         = false;     // play the category reveal on the next render
 let _shownScores        = [0, 0];    // scores as last displayed, to detect updates
 let _saved              = false;     // finished emission already recorded
+let _token              = null;      // one-time id from /generate, required to record the result
 
 const SOURCE_LABEL = {
   real:      'Vraies catégories',
@@ -165,6 +166,10 @@ export function renderEmissionBoard() {
     _saved = true;
     api.post('/api/emission/complete', {
       source: emissionSource, mode: playerMode, score: scores[0], oppScore: playerMode === 'duel' ? scores[1] : null,
+      token: _token,
+    }).then(({ xp }) => {
+      if (xp?.leveledUp)   showToast(`Niveau ${xp.level.level} atteint : ${xp.level.title} !`);
+      else if (xp?.gained) showToast(`Émission terminée · +${xp.gained} XP`);
     }).catch(() => {});
   }
 
@@ -465,6 +470,7 @@ async function generateEmission(source = 'real', episodeId = null) {
     if (episodeId) body.episodeId = episodeId;
     const data = await api.post('/api/emission/generate', body);
     emissionData = data;
+    _token       = data.token;
     emissionData.pairs = (emissionData.pairs || []).map(p => p ? { ...p, played: false } : null);
     if (emissionData.mcSong) emissionData.mcSong.played = false;
     playedCount   = 0;

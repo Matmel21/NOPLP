@@ -231,17 +231,29 @@ option { background: var(--bg2); color: var(--text); }
   margin-bottom: 24px;
 }
 
+/* Deep navy glass: darker than the generic gloss so cards sit in the theme,
+   with a sharp top sheen and rim light so they read glossy, not matte. */
 .song-card {
-  background: var(--gloss-bg);
-  border: 1px solid var(--border);
+  --card-shadow: inset 0 1px 0 rgba(255,255,255,.28), inset 0 -10px 24px rgba(0,8,30,.45), 0 6px 18px rgba(0,12,45,.5);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,.03) 48%, rgba(255,255,255,0) 52%),
+    linear-gradient(165deg, #1d59a6 0%, #133f80 42%, #0b2858 100%);
+  border: 1px solid rgba(125,185,255,.32);
   border-radius: var(--radius-lg);
   padding: 18px;
   cursor: pointer;
-  transition: all .2s;
+  transition: transform .2s, border-color .2s, box-shadow .2s;
   overflow: hidden;
-  box-shadow: var(--gloss-shadow);
+  box-shadow: var(--card-shadow);
 }
-.song-card:hover { border-color: var(--border2); transform: translateY(-2px); box-shadow: var(--gloss-shadow), 0 8px 22px rgba(0,10,40,.5); }
+.song-card::before {
+  background: radial-gradient(90% 70% at 20% 0%, rgba(120,190,255,.22), transparent 70%);
+}
+.song-card:hover {
+  border-color: rgba(160,210,255,.7);
+  transform: translateY(-2px);
+  box-shadow: var(--card-shadow), 0 0 0 1px rgba(46,143,255,.25), 0 10px 26px rgba(0,20,70,.6), 0 0 22px rgba(46,143,255,.28);
+}
 
 .song-card-title {
   font-weight: 600;
@@ -326,12 +338,6 @@ option { background: var(--bg2); color: var(--text); }
   cursor: not-allowed;
   text-decoration: line-through;
 }
-.song-card-score {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--green);
-}
-
 /* Contextual stat badge — reflects the active library sort */
 .song-card-stat {
   display: inline-block;
@@ -2175,7 +2181,14 @@ button.recent-row:hover { background: rgba(255,255,255,.06); }
   line-height: 1;
   margin-bottom: 6px;
 }
+.profile-stat-value.gold { color: var(--accent2); }
 .profile-stat-label { font-size: 13px; color: var(--text2); }
+
+/* Level + XP bar under the username (reuses the home hero chip and bar) */
+.profile-level { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; width: 380px; max-width: 100%; }
+.profile-level .hero-level { flex-wrap: wrap; }
+.profile-level:empty { display: none; }
+.profile-level-next { font-size: 12px; color: var(--text3); }
 
 /* Section wrappers */
 .profile-section {
@@ -2931,8 +2944,8 @@ button.recent-row:hover { background: rgba(255,255,255,.06); }
 .sq.current { color: #fff; border-color: #fff; box-shadow: 0 0 0 1px rgba(255,255,255,.35); }
 .song-card.status-flash { animation: status-flash .35s ease-out; }
 @keyframes status-flash {
-  0%   { box-shadow: var(--gloss-shadow), 0 0 0 0 rgba(160,215,255,.8); }
-  100% { box-shadow: var(--gloss-shadow), 0 0 0 10px rgba(160,215,255,0); }
+  0%   { box-shadow: var(--card-shadow), 0 0 0 0 rgba(160,215,255,.8); }
+  100% { box-shadow: var(--card-shadow), 0 0 0 10px rgba(160,215,255,0); }
 }
 
 /* Import button + keyboard hint */

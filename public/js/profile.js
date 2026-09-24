@@ -60,6 +60,7 @@ export async function loadProfile() {
   _user = data.user;
   renderAvatar(data.user);
   renderIdentity(data.user);
+  renderLevel(data.level);
   renderStats(data);
   renderWeek(actData);
   renderMasteryDonuts(data);
@@ -100,18 +101,41 @@ function renderIdentity(user) {
   bioEl.classList.toggle('profile-bio-empty', !user.bio);
 }
 
+// ── Level ─────────────────────────────────────────────────────────
+
+const fr = n => Number(n || 0).toLocaleString('fr-FR');
+
+function renderLevel(level) {
+  if (!level) return;
+  const span  = level.nextLevel - level.levelStart;
+  const inLvl = level.xp - level.levelStart;
+  const next  = level.nextTitle
+    ? `<span class="profile-level-next">${esc(level.nextTitle.title)} au niveau ${level.nextTitle.level}</span>`
+    : '';
+  document.getElementById('profile-level').innerHTML = `
+    <div class="hero-level">
+      <span class="level-chip">Niveau ${level.level}</span>
+      <span class="level-title">${esc(level.title)}</span>
+      ${next}
+    </div>
+    <div class="xp-row">
+      <div class="xp-bar"><div class="xp-fill" style="--w:${Math.round(inLvl / span * 100)}%"></div></div>
+      <span class="xp-text">${fr(inLvl)} / ${fr(span)} XP</span>
+    </div>`;
+}
+
 // ── Key stats ─────────────────────────────────────────────────────
 
 function renderStats(data) {
   const items = [
-    { label: 'Chansons jouées',   value: data.played },
-    { label: 'Émissions jouées',  value: data.emissions },
-    { label: 'Apprises',          value: data.maitrisee },
-    { label: 'Taux de réussite',  value: (data.successRate ?? 0) + '%' },
+    { label: 'Chansons jouées',  value: fr(data.played) },
+    { label: 'Émissions jouées', value: fr(data.emissions) },
+    { label: 'Clochettes',       value: fr(data.bells) },
+    { label: 'Gains en finale',  value: `${fr(data.finalWinnings)} €`, cls: 'gold' },
   ];
   document.getElementById('profile-stats').innerHTML = items.map(i => `
     <div class="profile-stat-card">
-      <div class="profile-stat-value">${i.value ?? 0}</div>
+      <div class="profile-stat-value${i.cls ? ' ' + i.cls : ''}">${i.value}</div>
       <div class="profile-stat-label">${i.label}</div>
     </div>`).join('');
 }

@@ -194,7 +194,6 @@ function coverageHtml({ coverage: c }) {
       <div class="cov-right">
         <div class="card-head">
           <span class="home-lbl">À apprendre en priorité</span>
-          <button class="home-link" data-action="open-smart" data-type="year_todo">Tout voir</button>
         </div>
         ${c.priority.map(p => `
           <button class="prio-row" data-action="play" data-id="${esc(p.id)}">
@@ -220,7 +219,6 @@ function playlistsHtml({ playlists, smart }) {
     <section class="home-section">
       <div class="card-head">
         <span class="home-lbl">Mes playlists</span>
-        <button class="home-link" data-action="library">Bibliothèque &#8594;</button>
       </div>
       <div class="pl-grid">
         ${playlists.map(pl => card({
@@ -229,8 +227,6 @@ function playlistsHtml({ playlists, smart }) {
           open: `data-action="open-playlist" data-id="${pl.id}"`,
           launch: `data-action="launch" data-source="playlist" data-id="${pl.id}"`,
         })).join('')}
-        ${card({ name: 'Tubes de l’année à apprendre', meta: `Liste auto · ${plural(smart.year_todo, 'chanson')}`, empty: !smart.year_todo,
-                 open: 'data-action="open-smart" data-type="year_todo"', launch: 'data-action="launch" data-source="year_todo"' })}
         ${card({ name: 'Même chanson', meta: `Liste auto · ${plural(smart.mc, 'chanson')}`, empty: !smart.mc,
                  open: 'data-action="open-smart" data-type="mc"', launch: 'data-action="launch" data-source="mc"' })}
         <button class="pl-new" data-action="new-playlist">+ Nouvelle playlist</button>
