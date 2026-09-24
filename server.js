@@ -640,6 +640,9 @@ app.post('/api/songs/:id/attempt', (req, res) => {
   const score  = Math.round(Number(req.body?.score));
   if (!Number.isFinite(score) || score < 0 || score > 100) return res.status(400).json({ error: 'Score invalide' });
   if (!stmtSongExists.get(songId)) return res.status(404).json({ error: 'Chanson introuvable' });
+  // Only a run started from the challenge card counts, so replaying the song
+  // at an easier level from the library can't validate it.
+  const today = req.body?.challenge === true ? todaysChallenge() : null;
 
   const challengeDone = db.transaction(() => {
     db.prepare(`
@@ -652,10 +655,10 @@ app.post('/api/songs/:id/attempt', (req, res) => {
         last_played = excluded.last_played
     `).run(uid, songId, score, score);
     db.prepare(`INSERT INTO sessions (user_id, song_id, played_at) VALUES (?, ?, date('now','localtime'))`).run(uid, songId);
-    if (score < CHALLENGE_PASS) return false;
+    if (!today || today.song_id !== songId || score < CHALLENGE_PASS) return false;
     return db.prepare(`
-      UPDATE daily_challenges SET completed = 1
-      WHERE user_id = ? AND day = date('now','localtime') AND song_id = ? AND completed = 0
+      INSERT INTO daily_challenges (user_id, day, song_id, completed) VALUES (?, date('now','localtime'), ?, 1)
+      ON CONFLICT(user_id, day) DO UPDATE SET song_id = excluded.song_id, completed = 1 WHERE completed = 0
     `).run(uid, songId).changes > 0;
   })();
 
@@ -1077,47 +1080,87 @@ app.get('/api/profile/activity', (req, res) => {
 const CHALLENGE_PASS = 50;      // % needed on the daily challenge song
 const DAILY_GOAL     = 3;       // songs played or learned per day
 
-// Today's challenge is picked once per user and stored, so it stays put all
-// day. A song is never given twice to the same user: each step below only
-// looks at songs this user has never had as a challenge, and not yet learned.
-//   1. the 40 songs aired most often over the last 12 months, random pick;
-//   2. once those run out, the 40 most-played songs of the whole archive;
-//   3. only when everything was used: the challenge given longest ago.
-const stmtChallengeToday = db.prepare(`SELECT song_id, completed FROM daily_challenges WHERE user_id = ? AND day = date('now','localtime')`);
-const CHALLENGE_POOLS = [
-  db.prepare(`
-    SELECT s.id FROM songs s LEFT JOIN progress p ON p.song_id = s.id AND p.user_id = ?
-    WHERE s.aired_12m > 0 AND (p.mastery IS NULL OR p.mastery != 'maitrisee')
-      AND NOT EXISTS (SELECT 1 FROM daily_challenges d WHERE d.user_id = ? AND d.song_id = s.id)
-    ORDER BY s.aired_12m DESC LIMIT 40`),
-  db.prepare(`
-    SELECT s.id FROM songs s LEFT JOIN progress p ON p.song_id = s.id AND p.user_id = ?
-    WHERE s.show_count > 0 AND (p.mastery IS NULL OR p.mastery != 'maitrisee')
-      AND NOT EXISTS (SELECT 1 FROM daily_challenges d WHERE d.user_id = ? AND d.song_id = s.id)
-    ORDER BY s.show_count DESC LIMIT 40`),
-];
-const stmtChallengeOldest = db.prepare(`
-  SELECT d.song_id AS id FROM daily_challenges d
-  LEFT JOIN progress p ON p.song_id = d.song_id AND p.user_id = d.user_id
-  WHERE d.user_id = ? AND (p.mastery IS NULL OR p.mastery != 'maitrisee')
-  GROUP BY d.song_id ORDER BY MAX(d.day) ASC LIMIT 1`);
+// ── Daily challenge, shared by every player ─────────────────────────
+// One song per day for the whole platform, drawn the first time someone
+// opens the home screen that day and stored, so everyone gets the same
+// song, the same points category and the same missing lyrics.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS global_challenges (
+    day     TEXT PRIMARY KEY,
+    song_id TEXT NOT NULL,
+    level   INTEGER NOT NULL,
+    phrase  TEXT NOT NULL,
+    FOREIGN KEY(song_id) REFERENCES songs(id)
+  );
+`);
+const CHALLENGE_LEVELS = [10, 20, 30, 40, 50];
+const stmtGlobalToday = db.prepare(`SELECT * FROM global_challenges WHERE day = date('now','localtime')`);
 
-function dailyChallenge(uid) {
-  let row = stmtChallengeToday.get(uid);
-  if (!row) {
-    let pick = null;
-    for (const pool of CHALLENGE_POOLS) {
-      const ids = pool.all(uid, uid);
-      if (ids.length) { pick = ids[crypto.randomInt(ids.length)].id; break; }
+// { level: [phrases] } for the categories that have lyrics to find
+function playableLevels(blanksJson) {
+  let bj = {};
+  try { bj = JSON.parse(blanksJson || '{}') || {}; } catch (_) {}
+  const out = {};
+  for (const l of CHALLENGE_LEVELS) {
+    const phrases = bj[String(l)];
+    if (Array.isArray(phrases) && phrases.some(p => typeof p === 'string' && p.trim())) {
+      out[l] = phrases.filter(p => typeof p === 'string' && p.trim());
     }
-    pick ??= stmtChallengeOldest.get(uid)?.id;
-    if (!pick) return null;
-    // Two tabs opening at once must not create two different challenges
-    db.prepare(`INSERT OR IGNORE INTO daily_challenges (user_id, day, song_id) VALUES (?, date('now','localtime'), ?)`).run(uid, pick);
-    row = stmtChallengeToday.get(uid);
   }
-  const song = db.prepare(`SELECT id, title, artist, year, aired_12m FROM songs WHERE id = ?`).get(row.song_id);
-  return song && { ...song, completed: !!row.completed, xp: XP.challenge, pass: CHALLENGE_PASS };
+  return out;
+}
+
+// Candidates: songs aired over the last 12 months that are playable. We keep
+// the middle of the popularity range — at least 2 airings (not an unknown
+// one-off) and outside the 20 % most aired (the hits everyone knows).
+// A song is never drawn twice; once all were used, the oldest one comes back.
+function drawChallenge() {
+  const rows = db.prepare(`
+    SELECT id, aired_12m, blanks_json FROM songs
+    WHERE aired_12m > 0 AND lyrics IS NOT NULL AND lyrics != '' AND blanks_json IS NOT NULL
+    ORDER BY aired_12m DESC
+  `).all().filter(r => Object.keys(playableLevels(r.blanks_json)).length);
+  if (!rows.length) return null;
+
+  const middle = rows.slice(Math.ceil(rows.length * 0.2)).filter(r => r.aired_12m >= 2);
+  const pool = middle.length ? middle : rows;
+  const lastUsed = new Map(db.prepare(`SELECT song_id, MAX(day) AS day FROM global_challenges GROUP BY song_id`).all()
+    .map(r => [r.song_id, r.day]));
+  const fresh = pool.filter(r => !lastUsed.has(r.id));
+  const song = fresh.length
+    ? fresh[crypto.randomInt(fresh.length)]
+    : [...pool].sort((a, b) => (lastUsed.get(a.id) < lastUsed.get(b.id) ? -1 : 1))[0];
+
+  const levels  = playableLevels(song.blanks_json);
+  const keys    = Object.keys(levels).map(Number);
+  const level   = keys[crypto.randomInt(keys.length)];
+  const phrases = levels[level];
+  return { song_id: song.id, level, phrase: phrases[crypto.randomInt(phrases.length)] };
+}
+
+function todaysChallenge() {
+  let row = stmtGlobalToday.get();
+  if (!row) {
+    const pick = drawChallenge();
+    if (!pick) return null;
+    // Two first visitors at the same moment must not get different songs
+    db.prepare(`INSERT OR IGNORE INTO global_challenges (day, song_id, level, phrase) VALUES (date('now','localtime'), ?, ?, ?)`)
+      .run(pick.song_id, pick.level, pick.phrase);
+    row = stmtGlobalToday.get();
+  }
+  return row;
+}
+
+// The user's own row only tracks completion (badges, streak of challenges)
+function dailyChallenge(uid) {
+  const g = todaysChallenge();
+  if (!g) return null;
+  const mine = db.prepare(`SELECT song_id, completed FROM daily_challenges WHERE user_id = ? AND day = date('now','localtime')`).get(uid);
+  const song = db.prepare(`SELECT id, title, artist, year, aired_12m FROM songs WHERE id = ?`).get(g.song_id);
+  return song && {
+    ...song, level: g.level, phrase: g.phrase,
+    completed: !!mine?.completed, xp: XP.challenge,
+  };
 }
 
 const BADGES = [
@@ -1180,7 +1223,7 @@ app.get('/api/home', (req, res) => {
     FROM progress WHERE user_id = ?
   `).get(uid);
   const next = db.prepare(`
-    SELECT s.id, s.title, s.artist, s.year, p.mastery, p.last_score, p.last_played
+    SELECT s.id, s.title, s.artist, s.year, p.mastery, p.last_played
     FROM progress p JOIN songs s ON s.id = p.song_id
     WHERE p.user_id = ? AND p.mastery IN ('revision','prevue')
     ORDER BY (p.mastery = 'revision') DESC, p.last_played IS NOT NULL, p.last_played ASC
@@ -1203,7 +1246,7 @@ app.get('/api/home', (req, res) => {
   const mcCount = db.prepare(`SELECT COUNT(*) AS n FROM songs WHERE mc_count > 0`).get().n;
 
   const recentSongs = db.prepare(`
-    SELECT 'song' AS type, s.id, s.title, s.artist, p.last_score AS score, p.last_played AS at
+    SELECT 'song' AS type, s.id, s.title, s.artist, p.last_played AS at
     FROM progress p JOIN songs s ON s.id = p.song_id
     WHERE p.user_id = ? AND p.last_played IS NOT NULL
     ORDER BY p.last_played DESC LIMIT 4

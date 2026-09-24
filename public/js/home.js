@@ -140,7 +140,7 @@ function continueHtml({ queue }) {
       </section>`;
   }
   const n = queue.next;
-  const last = n.last_played ? `Dernier essai : ${n.last_score ?? 0} % · ${ago(n.last_played)}` : 'Jamais jouée';
+  const last = n.last_played ? `Dernière révision ${ago(n.last_played)}` : 'Jamais jouée';
   return `
     <section class="home-card home-continue">
       ${head}
@@ -150,7 +150,7 @@ function continueHtml({ queue }) {
         <span class="card-meta">${last}</span>
       </div>
       <div class="card-actions">
-        <button class="home-btn" data-action="play" data-id="${esc(n.id)}">&#9654; Réviser maintenant</button>
+        <button class="home-btn" data-action="quick" data-id="${esc(n.id)}">&#9654; Réviser maintenant</button>
         <button class="home-btn ghost" data-action="launch" data-source="queue">Série rapide · ${Math.min(10, queue.total)}</button>
         <button class="home-link" data-action="custom">Personnaliser…</button>
       </div>
@@ -172,10 +172,10 @@ function challengeHtml({ challenge: c }) {
         <span class="xp-tag">+${c.xp} XP</span>
       </div>
       ${pillHtml(c)}
-      <div class="card-meta">Sortie ${fr(c.aired_12m)} fois ces 12 derniers mois · réussis-la à ${c.pass} % ou plus.</div>
+      <div class="card-meta">Catégorie ${c.level} pts · sortie ${fr(c.aired_12m)} fois ces 12 derniers mois · le même défi pour tous les joueurs.</div>
       ${c.completed
         ? '<div class="challenge-done">&#10003; Défi relevé ! Nouveau défi demain.</div>'
-        : `<div class="card-actions"><button class="home-btn gold" data-action="play" data-id="${esc(c.id)}">Relever le défi</button></div>`}
+        : '<div class="card-actions"><button class="home-btn gold" data-action="challenge">Relever le défi</button></div>'}
     </section>`;
 }
 
@@ -258,11 +258,10 @@ function badgesHtml({ badges }) {
 }
 
 function recentHtml({ recent }) {
-  const scoreTag = s => `<span class="score-pill ${s >= 80 ? 'high' : s >= 50 ? 'mid' : 'low'}">${s} %</span>`;
   const rows = recent.map(r => r.type === 'song'
     ? `<button class="recent-row" data-action="play" data-id="${esc(r.id)}">
          <span class="recent-title">${esc(r.title)} <span>· ${esc(r.artist)}</span></span>
-         <span class="recent-when">${ago(r.at)}</span>${scoreTag(r.score ?? 0)}
+         <span class="recent-when">${ago(r.at)}</span>
        </button>`
     : `<div class="recent-row">
          <span class="recent-title">Émission <span>· ${SOURCE_LABEL[r.source] || ''}${r.mode === 'duel' ? ' · 1 contre 1' : ''}</span></span>
@@ -284,6 +283,8 @@ async function onHomeClick(e) {
   const { action, id, source, type } = el.dataset;
   switch (action) {
     case 'play':          return openSong(id);
+    case 'quick':         return quickSong(id);
+    case 'challenge':     return startChallenge();
     case 'launch':        return startSeries(source, id);
     case 'custom':        return openRevisionModal();
     case 'library':       return showView('library');
@@ -296,8 +297,37 @@ async function onHomeClick(e) {
 
 async function openSong(id) {
   state.revisionQueue = [];
+  state.quickPlay = false;
   const { openModeModal } = await import('./game.js');
   openModeModal(id);
+}
+
+// Straight into the game: random points category, no mode modal
+async function quickSong(id) {
+  state.revisionQueue = [];
+  state.quickPlay = false;
+  const { quickStart } = await import('./game.js');
+  quickStart(id).catch(() => showToast('Erreur lors du chargement'));
+}
+
+// Same song, category and missing lyrics for every player
+async function startChallenge() {
+  const c = _data?.challenge;
+  if (!c) return;
+  state.revisionQueue = [];
+  state.quickPlay = false;
+  const { quickStart } = await import('./game.js');
+  quickStart(c.id, { level: c.level, phrase: c.phrase, challenge: true })
+    .catch(() => showToast('Erreur lors du chargement'));
+}
+
+// A series plays song after song without asking for a category each time
+async function playQueue(songs) {
+  state.revisionQueue    = songs;
+  state.revisionQueueIdx = 0;
+  state.quickPlay        = true;
+  const { quickStart } = await import('./game.js');
+  await quickStart(songs[0].id);
 }
 
 async function startSeries(source, id) {
@@ -306,10 +336,7 @@ async function startSeries(source, id) {
   try {
     const songs = await api.get('/api/revision-queue?' + params);
     if (!songs.length) { showToast('Aucune chanson à réviser ici'); return; }
-    state.revisionQueue    = songs;
-    state.revisionQueueIdx = 0;
-    const { openModeModal } = await import('./game.js');
-    openModeModal(songs[0].id);
+    await playQueue(songs);
   } catch { showToast('Erreur lors du chargement'); }
 }
 
@@ -383,10 +410,7 @@ async function startCustomRevision() {
       showToast(`Aucune chanson ${labels[_revMode] || ''} trouvée`);
       return;
     }
-    state.revisionQueue    = songs;
-    state.revisionQueueIdx = 0;
-    const { openModeModal } = await import('./game.js');
-    openModeModal(songs[0].id);
+    await playQueue(songs);
   } catch { showToast('Erreur lors du chargement'); }
 }
 

@@ -132,6 +132,26 @@ async function setSongStatus(mastery) {
   }
 }
 
+// ── Quick start (no mode modal) ──────────────────────────────────────
+// Launches a song straight into a points round. Without a level, a random
+// category among the ones that have lyrics to find is used, as on the show.
+
+function playableLevels(song) {
+  try {
+    const bj = JSON.parse(song.blanks_json || '{}');
+    return [10, 20, 30, 40, 50].filter(l => Array.isArray(bj[String(l)]) && bj[String(l)].length);
+  } catch (_) { return []; }
+}
+
+export async function quickStart(id, { level, phrase, challenge } = {}) {
+  const data = await api.get('/api/songs/' + encodeURIComponent(id));
+  state.song = data;
+  const levels = playableLevels(data);
+  const lvl = level || (levels.length ? levels[Math.floor(Math.random() * levels.length)] : 20);
+  const src = !data.youtube_url?.trim() && data.karaoke_url?.trim() ? 'karaoke' : 'classic';
+  startGame('normal', lvl, 0, src, { phrase, challenge });
+}
+
 export function closeModeModal() {
   document.getElementById('mode-modal').classList.add('hidden');
   document.body.style.overflow = '';
@@ -139,8 +159,10 @@ export function closeModeModal() {
 
 // ── startGame ────────────────────────────────────────────────────────
 
-export function startGame(mode, difficulty, finaleStep, mcVideoMode = 'classic') {
+export function startGame(mode, difficulty, finaleStep, mcVideoMode = 'classic', { phrase = null, challenge = false } = {}) {
   _attemptSaved              = false;   // reset per-game guard
+  state.forcedPhrase         = phrase;
+  state.isChallenge          = challenge;
   state.gameMode             = mode;
   state.difficulty           = difficulty;
   state.finaleStep           = finaleStep;
@@ -160,7 +182,7 @@ export function startGame(mode, difficulty, finaleStep, mcVideoMode = 'classic')
   if (tsJson) { try { state.timestamps = JSON.parse(tsJson); } catch (_) {} }
 
   // Header
-  const badge = { normal: `Niveau ${difficulty} pts`, mc: 'Même Chanson', finale: `Finale — ${FN_ROUNDS[finaleStep]?.toLocaleString('fr-FR')} €` };
+  const badge = { normal: `${challenge ? 'Défi du jour — ' : ''}Niveau ${difficulty} pts`, mc: 'Même Chanson', finale: `Finale — ${FN_ROUNDS[finaleStep]?.toLocaleString('fr-FR')} €` };
   document.getElementById('gm-mode-badge').textContent = badge[mode] || '';
   document.getElementById('gm-title').textContent      = state.song.title;
   document.getElementById('gm-artist').textContent     = state.song.artist;
@@ -272,13 +294,13 @@ export function nextFinaleRound() {
 // times finishGame or closeGame are called (sync loop, YT auto-advance, etc.)
 let _attemptSaved = false;
 
-// Resolves to the server's XP result ({ gained, level, leveledUp }) or null
+// Resolves to the server's answer ({ xp: { gained, level, leveledUp }, challengeDone }) or null
 async function saveAttempt() {
   if (_attemptSaved || !state.song) return null;
   _attemptSaved = true;
   try {
-    const res = await api.post('/api/songs/' + encodeURIComponent(state.song.id) + '/attempt', { score: state.score });
-    return res.xp || null;
+    return await api.post('/api/songs/' + encodeURIComponent(state.song.id) + '/attempt',
+      { score: state.score, challenge: state.isChallenge });
   } catch (_) { return null; }
 }
 
@@ -287,9 +309,12 @@ export async function finishGame() {
   clearTypingArea();
   document.getElementById('typing-area').classList.add('hidden');
   showToast(`Terminé ! Score : ${state.score}%`);
-  const xp = await saveAttempt();
-  if (xp?.leveledUp)  showToast(`Niveau ${xp.level.level} atteint : ${xp.level.title} !`);
-  else if (xp?.gained) showToast(`Terminé ! Score : ${state.score}% · +${xp.gained} XP`);
+  const res = await saveAttempt();
+  const xp  = res?.xp;
+  if (xp?.leveledUp)          showToast(`Niveau ${xp.level.level} atteint : ${xp.level.title} !`);
+  else if (res?.challengeDone) showToast(`Défi du jour relevé ! +${xp.gained} XP`);
+  else if (xp?.gained)         showToast(`Terminé ! Score : ${state.score}% · +${xp.gained} XP`);
+  else if (state.isChallenge)  showToast('Défi manqué, retente ta chance !');
   // Show next-song button if we're in a revision queue with songs remaining
   const hasNext = state.revisionQueueIdx >= 0
     && state.revisionQueueIdx < state.revisionQueue.length - 1;
@@ -353,7 +378,8 @@ export function initGame() {
     document.getElementById('btn-next-song').classList.add('hidden');
     document.getElementById('game-modal').classList.add('hidden');
     document.body.style.overflow = '';
-    openModeModal(next.id);
+    if (state.quickPlay) quickStart(next.id);
+    else openModeModal(next.id);
   });
 
   // Karaoke toggle — switch the player between the official clip and the karaoke version

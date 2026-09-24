@@ -47,6 +47,11 @@ export const state = {
   // Revision queue
   revisionQueue:    [],
   revisionQueueIdx: -1,
+  quickPlay:        false,   // queue launched straight into the game (no mode modal)
+
+  // Set by startGame's options
+  forcedPhrase: null,        // lyrics to hide instead of a random pick (daily challenge)
+  isChallenge:  false,       // this run is the daily challenge
 
   // Internal timers
   _autoAdvanceTimer: null,
