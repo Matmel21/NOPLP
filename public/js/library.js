@@ -11,10 +11,14 @@ let _playlists = [];
 
 // ── loadLibrary ──────────────────────────────────────────────────────
 
+// Only the latest request may render: fast typing in the search box fires
+// several, and an older, slower answer must not replace the newer one.
+let _loadSeq = 0;
+
 export async function loadLibrary() {
+  const seq = ++_loadSeq;
   const params = new URLSearchParams({
     search:  state.search,
-    artist:  state.artist,
     mastery: state.mastery,
     type:    state.type,
     sort:    state.sort,
@@ -22,8 +26,10 @@ export async function loadLibrary() {
     offset:  state.page * state.limit,
   });
   if (state.playlist) params.set('playlist', state.playlist);
-  const { songs, total } = await api.get('/api/songs?' + params);
-  renderSongGrid(songs, total);
+  try {
+    const { songs, total } = await api.get('/api/songs?' + params);
+    if (seq === _loadSeq) renderSongGrid(songs, total);
+  } catch { if (seq === _loadSeq) showToast('Erreur lors du chargement de la bibliothèque'); }
 }
 
 // Contextual stat badge — shows the metric matching the active sort.
@@ -65,9 +71,10 @@ function renderSongGrid(songs, total) {
     const altBadge  = alts.length
       ? `<span class="song-versions-badge" title="${alts.map(v => esc(v.artist) + (v.year ? ' - ' + v.year : '')).join('\n')}">${alts.length + 1} versions</span>`
       : '';
-    const altData   = alts.length ? ` data-alts='${JSON.stringify(alts)}'` : '';
+    // Escaped: an apostrophe in an artist name must not end the attribute
+    const altData   = alts.length ? ` data-alts="${esc(JSON.stringify(alts))}"` : '';
     return `
-      <div class="song-card" data-id="${s.id}" data-mastery="${s.mastery || ''}"${altData}>
+      <div class="song-card" data-id="${esc(s.id)}" data-mastery="${s.mastery || ''}"${altData}>
         <div class="song-card-actions">
           <button class="song-star${s.in_default ? ' on' : ''}" data-id="${esc(s.id)}" title="Favoris"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3L2.9 9.5l6.3-.9z"/></svg></button>
           <button class="song-pl-btn" data-id="${esc(s.id)}" title="Choisir une playlist"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
@@ -180,7 +187,7 @@ async function openVersionPicker(card, alts) {
   popover.innerHTML = `
     <div class="pl-picker-header">Choisir une version</div>
     ${all.map(v => `
-      <button class="pl-picker-row version-pick-row" data-id="${v.id}">
+      <button class="pl-picker-row version-pick-row" data-id="${esc(v.id)}">
         <span class="pl-picker-name">${esc(v.artist)}${v.year ? ' - ' + v.year : ''}</span>
       </button>`).join('')}`;
 
@@ -315,7 +322,9 @@ function renderPlaylistPanel() {
       const id = btn.dataset.id;
       const ok = await confirmDialog({ title: 'Supprimer cette playlist ?', confirmLabel: 'Supprimer', danger: true });
       if (!ok) return;
-      await api.delete(`/api/playlists/${id}`);
+      try {
+        await api.delete(`/api/playlists/${id}`);
+      } catch (err) { showToast(err.message); return; }
       if (state.playlist == id) { state.playlist = null; state.page = 0; }
       await loadPlaylists();
       loadLibrary();
@@ -328,9 +337,10 @@ export async function initLibraryPlaylists() {
   document.getElementById('btn-new-playlist').addEventListener('click', async () => {
     const name = await promptDialog({ title: 'Nouvelle playlist', placeholder: 'Nom de la playlist', maxLength: 60, confirmLabel: 'Créer' });
     if (!name) return;
-    const pl = await api.post('/api/playlists', { name });
-    _playlists.push(pl);
-    renderPlaylistPanel();
+    try {
+      _playlists.push(await api.post('/api/playlists', { name }));
+      renderPlaylistPanel();
+    } catch (err) { showToast(err.message); }
   });
 }
 
@@ -387,15 +397,6 @@ document.addEventListener('mastery-changed', e => {
   if (card) applyMasteryToCard(card, e.detail.mastery);
 });
 
-// ── Artists dropdown ─────────────────────────────────────────────────
-
-export async function loadArtists() {
-  const artists = await api.get('/api/artists');
-  const sel     = document.getElementById('artist-filter');
-  sel.innerHTML = '<option value="">Tous les artistes</option>' +
-    artists.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('');
-}
-
 // ── Static listeners (registered once via initLibrary) ───────────────
 
 let _hoverCard = null;
@@ -434,6 +435,12 @@ export function initLibrary() {
     state.sort = e.target.value; state.page = 0; loadLibrary();
   });
 
-  document.getElementById('prev-page').addEventListener('click', () => { state.page--; loadLibrary(); });
-  document.getElementById('next-page').addEventListener('click', () => { state.page++; loadLibrary(); });
+  // A new page starts at the top of the grid, not where the old one was scrolled
+  const turnPage = delta => {
+    state.page += delta;
+    loadLibrary();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+  document.getElementById('prev-page').addEventListener('click', () => turnPage(-1));
+  document.getElementById('next-page').addEventListener('click', () => turnPage(1));
 }

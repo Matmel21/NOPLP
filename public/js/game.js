@@ -1,10 +1,10 @@
 // ═══ GAME — mode selection, start, finish, finale rounds ═══════════
 import { state, FN_ROUNDS }                              from './state.js';
 import { api }                                           from './api.js';
-import { esc, showToast }                                from './utils.js';
+import { showToast }                                     from './utils.js';
 import { parseBlanks, buildLineQueue }                   from './blanks.js';
 import { renderLyrics, advanceLine, updateBlanksLeft,
-         showQueueLine, clearTypingArea }                from './lyrics.js';
+         clearTypingArea }                               from './lyrics.js';
 import { setupTypingArea }                               from './typing.js';
 import { extractYtId, startSync, stopSync, hideYtError } from './youtube.js';
 import { exitCalibMode }                                 from './calibration.js';
@@ -16,7 +16,9 @@ import { exitCalibMode }                                 from './calibration.js'
 // ── Mode selection modal ─────────────────────────────────────────────
 
 export async function openModeModal(id) {
-  const data = await api.get('/api/songs/' + encodeURIComponent(id));
+  let data;
+  try { data = await api.get('/api/songs/' + encodeURIComponent(id)); }
+  catch (err) { showToast(err.message); return; }
   state.song = data;
 
   document.getElementById('mode-title').textContent  = data.title;
@@ -69,8 +71,9 @@ export async function openModeModal(id) {
     .map(l => `<button class="mode-btn" data-mode="normal" data-diff="${l}">${LEVEL_LABELS[l] || l + '%'}</button>`)
     .join('');
 
+  // MC and finale rounds need their scraped data, not just an airing count
   const mcSection = document.getElementById('mode-mc-section');
-  if (data.mc_count) {
+  if (data.mc_count && data.mc_json) {
     mcSection.classList.remove('hidden');
     document.getElementById('mode-mc-btns').innerHTML =
       `<button class="mode-btn mode-btn-mc" data-mode="mc">Jouer</button>`;
@@ -79,7 +82,7 @@ export async function openModeModal(id) {
   }
 
   const fnSection = document.getElementById('mode-finale-section');
-  if (data.fn_count) {
+  if (data.fn_count && data.fn_json) {
     fnSection.classList.remove('hidden');
     document.getElementById('mode-finale-btns').innerHTML = FN_ROUNDS
       .map((amount, i) => `<button class="mode-btn mode-btn-finale" data-mode="finale" data-step="${i}">${amount.toLocaleString('fr-FR')} €</button>`)
@@ -87,19 +90,6 @@ export async function openModeModal(id) {
   } else {
     fnSection.classList.add('hidden');
   }
-
-  document.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const activesrc = videoToggle.querySelector('.video-src-btn.active')?.dataset.src || 'classic';
-      closeModeModal();
-      startGame(
-        btn.dataset.mode,
-        parseInt(btn.dataset.diff) || 20,
-        parseInt(btn.dataset.step) || 0,
-        activesrc,
-      );
-    });
-  });
 
   document.getElementById('mode-modal').classList.remove('hidden');
   document.body.style.overflow = 'hidden';
@@ -143,12 +133,18 @@ function playableLevels(song) {
   } catch (_) { return []; }
 }
 
-export async function quickStart(id, { level, phrase, challenge } = {}) {
+// mode 'mc' plays the "Même chanson" round (karaoke clip when there is one).
+export async function quickStart(id, { mode = 'normal', level, phrase, challenge } = {}) {
   const data = await api.get('/api/songs/' + encodeURIComponent(id));
   state.song = data;
+  const hasKaraoke = !!data.karaoke_url?.trim();
+  if (mode === 'mc' && data.mc_json) {
+    startGame('mc', 20, 0, hasKaraoke ? 'karaoke' : 'classic');
+    return;
+  }
   const levels = playableLevels(data);
   const lvl = level || (levels.length ? levels[Math.floor(Math.random() * levels.length)] : 20);
-  const src = !data.youtube_url?.trim() && data.karaoke_url?.trim() ? 'karaoke' : 'classic';
+  const src = !data.youtube_url?.trim() && hasKaraoke ? 'karaoke' : 'classic';
   startGame('normal', lvl, 0, src, { phrase, challenge });
 }
 
@@ -160,7 +156,8 @@ export function closeModeModal() {
 // ── startGame ────────────────────────────────────────────────────────
 
 export function startGame(mode, difficulty, finaleStep, mcVideoMode = 'classic', { phrase = null, challenge = false } = {}) {
-  _attemptSaved              = false;   // reset per-game guard
+  _attemptSaved              = false;   // reset per-game guards
+  _finished                  = false;
   state.forcedPhrase         = phrase;
   state.isChallenge          = challenge;
   state.gameMode             = mode;
@@ -293,6 +290,8 @@ export function nextFinaleRound() {
 // Guard: only one attempt/session saved per game, regardless of how many
 // times finishGame or closeGame are called (sync loop, YT auto-advance, etc.)
 let _attemptSaved = false;
+// Space after the last line calls finishGame again: finish (toasts included) once
+let _finished = false;
 
 // Resolves to the server's answer ({ xp: { gained, level, leveledUp }, challengeDone }) or null
 async function saveAttempt() {
@@ -305,6 +304,8 @@ async function saveAttempt() {
 }
 
 export async function finishGame() {
+  if (_finished) return;
+  _finished = true;
   stopSync();
   clearTypingArea();
   document.getElementById('typing-area').classList.add('hidden');
@@ -360,6 +361,14 @@ export async function closeGame() {
 
 export function initGame() {
   document.getElementById('btn-close-mode').addEventListener('click', closeModeModal);
+  // Mode buttons are re-rendered for each song: one delegated listener
+  document.querySelector('#mode-modal .mode-panel').addEventListener('click', e => {
+    const btn = e.target.closest('.mode-btn');
+    if (!btn) return;
+    const src = document.querySelector('#mode-video-toggle .video-src-btn.active')?.dataset.src || 'classic';
+    closeModeModal();
+    startGame(btn.dataset.mode, parseInt(btn.dataset.diff) || 20, parseInt(btn.dataset.step) || 0, src);
+  });
   document.querySelectorAll('.mode-status-btn').forEach(btn =>
     btn.addEventListener('click', () => setSongStatus(btn.dataset.mastery)));
   document.getElementById('mode-overlay').addEventListener('click', closeModeModal);
@@ -378,7 +387,7 @@ export function initGame() {
     document.getElementById('btn-next-song').classList.add('hidden');
     document.getElementById('game-modal').classList.add('hidden');
     document.body.style.overflow = '';
-    if (state.quickPlay) quickStart(next.id);
+    if (state.quickPlay) quickStart(next.id, { mode: state.quickPlay }).catch(err => showToast(err.message));
     else openModeModal(next.id);
   });
 

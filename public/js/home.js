@@ -1,7 +1,7 @@
 // ═══ HOME VIEW — gamified dashboard ════════════════════════════════
 import { api }                           from './api.js';
 import { showView }                      from './nav.js';
-import { esc, showToast, promptDialog }  from './utils.js';
+import { esc, showToast, promptDialog, MASTERY_LABEL } from './utils.js';
 import { state }                         from './state.js';
 import { presetLibrary, refreshPlaylists } from './library.js';
 
@@ -10,7 +10,6 @@ let _data     = null;
 let _revMode  = null;   // custom series modal
 let _revCount = 5;
 
-const MASTERY_LABEL = { maitrisee: 'Apprise', prevue: 'En cours', revision: 'À revoir' };
 const SOURCE_LABEL  = { real: 'Vraies catégories', episode: 'Épisode rejoué', generated: 'Catégories inventées' };
 const fr = n => Number(n || 0).toLocaleString('fr-FR');
 const plural = (n, word) => `${fr(n)} ${word}${n > 1 ? 's' : ''}`;
@@ -307,7 +306,7 @@ async function quickSong(id) {
   state.revisionQueue = [];
   state.quickPlay = false;
   const { quickStart } = await import('./game.js');
-  quickStart(id).catch(() => showToast('Erreur lors du chargement'));
+  quickStart(id).catch(err => showToast(err.message));
 }
 
 // Same song, category and missing lyrics for every player
@@ -318,16 +317,17 @@ async function startChallenge() {
   state.quickPlay = false;
   const { quickStart } = await import('./game.js');
   quickStart(c.id, { level: c.level, phrase: c.phrase, challenge: true })
-    .catch(() => showToast('Erreur lors du chargement'));
+    .catch(err => showToast(err.message));
 }
 
-// A series plays song after song without asking for a category each time
-async function playQueue(songs) {
+// A series plays song after song without asking for a category each time.
+// "Même chanson" series are played as MC rounds.
+async function playQueue(songs, mode = 'normal') {
   state.revisionQueue    = songs;
   state.revisionQueueIdx = 0;
-  state.quickPlay        = true;
+  state.quickPlay        = mode;
   const { quickStart } = await import('./game.js');
-  await quickStart(songs[0].id);
+  await quickStart(songs[0].id, { mode });
 }
 
 async function startSeries(source, id) {
@@ -336,16 +336,18 @@ async function startSeries(source, id) {
   try {
     const songs = await api.get('/api/revision-queue?' + params);
     if (!songs.length) { showToast('Aucune chanson à réviser ici'); return; }
-    await playQueue(songs);
-  } catch { showToast('Erreur lors du chargement'); }
+    await playQueue(songs, source === 'mc' ? 'mc' : 'normal');
+  } catch (err) { showToast(err.message); }
 }
 
 async function createPlaylist() {
   const name = await promptDialog({ title: 'Nouvelle playlist', placeholder: 'Nom de la playlist', maxLength: 60, confirmLabel: 'Créer' });
   if (!name) return;
-  await api.post('/api/playlists', { name });
-  await refreshPlaylists();
-  loadHome();
+  try {
+    await api.post('/api/playlists', { name });
+    await refreshPlaylists();
+    loadHome();
+  } catch (err) { showToast(err.message); }
 }
 
 function openBadges() {
@@ -410,8 +412,8 @@ async function startCustomRevision() {
       showToast(`Aucune chanson ${labels[_revMode] || ''} trouvée`);
       return;
     }
-    await playQueue(songs);
-  } catch { showToast('Erreur lors du chargement'); }
+    await playQueue(songs, _revMode === 'mc' ? 'mc' : 'normal');
+  } catch (err) { showToast(err.message); }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────

@@ -405,15 +405,17 @@ function closePick() {
 // ── Game launch ───────────────────────────────────────────────────
 
 async function startEmissionGame(songId, level) {
-  const data = await api.get('/api/songs/' + encodeURIComponent(songId));
-  state.song = data;
+  try { state.song = await api.get('/api/songs/' + encodeURIComponent(songId)); }
+  catch (err) { showToast(err.message); currentPlayingLevel = null; return; }
   startGame('normal', level, 0, 'classic');
 }
 
 async function startMcGame() {
   if (!emissionData?.mcSong) return;
   currentPlayingLevel = null;
-  const data = await api.get('/api/songs/' + encodeURIComponent(emissionData.mcSong.id));
+  let data;
+  try { data = await api.get('/api/songs/' + encodeURIComponent(emissionData.mcSong.id)); }
+  catch (err) { showToast(err.message); return; }
   state.song = data;
   const startSrc = data.karaoke_url?.trim() ? 'karaoke' : 'classic';
   startGame('mc', 20, 0, startSrc);
@@ -496,6 +498,10 @@ async function generateEmission(source = 'real', episodeId = null) {
 export function initEmission(user) {
   _user = user;
   if (user?.username) _duelNames[0] = user.username;
+  // Keep player 1 in sync when the pseudo is changed from the profile
+  document.addEventListener('user-renamed', e => {
+    if (_duelNames[0] === e.detail.from) _duelNames[0] = e.detail.to;
+  });
 
   document.getElementById('btn-close-emission-pick')
     .addEventListener('click', closePick);

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NOPLR — N'oubliez pas les révisions</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/css/style.css">
 </head>
@@ -231,13 +232,6 @@
   </div>
 </div>
 
-<!-- Mastery picker popover -->
-<div id="mastery-picker" class="mastery-picker hidden">
-  <button class="mastery-pick-btn" data-mastery="maitrisee">Apprise</button>
-  <button class="mastery-pick-btn" data-mastery="revision">A revoir</button>
-  <button class="mastery-pick-btn" data-mastery="prevue">En cours</button>
-</div>
-
 <!-- ── MODAL: MODE SELECTION ──────────────────────────── -->
 <div id="mode-modal" class="modal hidden">
   <div class="modal-overlay" id="mode-overlay"></div>
@@ -368,11 +362,11 @@
     <form id="auth-form" class="auth-form" autocomplete="on">
       <label class="auth-label">
         Nom d'utilisateur
-        <input id="auth-username" type="text" class="auth-input" autocomplete="username" required>
+        <input id="auth-username" type="text" class="auth-input" autocomplete="username" maxlength="64" required>
       </label>
       <label class="auth-label">
         Mot de passe
-        <input id="auth-password" type="password" class="auth-input" autocomplete="current-password" required>
+        <input id="auth-password" type="password" class="auth-input" autocomplete="current-password" maxlength="128" required>
       </label>
       <p id="auth-error" class="auth-error"></p>
       <button id="auth-submit" type="submit" class="auth-btn">Se connecter</button>
@@ -394,7 +388,7 @@
       <button class="rev-mode-btn" data-mode="mc">🎲 Surprends moi (MC)</button>
     </div>
     <div class="revision-count-row">
-      <label for="rev-count">Nombre de chansons</label>
+      <span>Nombre de chansons</span>
       <div class="rev-count-controls">
         <button class="rev-count-btn" id="rev-count-minus">−</button>
         <span id="rev-count-display">5</span>

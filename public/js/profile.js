@@ -25,18 +25,28 @@ export function initProfile(user) {
         if (authUser) authUser.avatar_url = avatar_url;
         renderAvatar(_user);
         showToast('Avatar mis à jour');
-      } catch { showToast('Erreur lors du téléchargement'); }
+      } catch (err) { showToast(err.message); }
+      e.target.value = '';   // choosing the same file again must fire "change" again
     };
     reader.readAsDataURL(file);
   });
 
   document.getElementById('btn-edit-username').addEventListener('click', async () => {
     const current = document.getElementById('profile-username').textContent;
-    const val = await promptDialog({ title: 'Modifier le pseudo', value: current, maxLength: 64, confirmLabel: 'Enregistrer' });
+    const val = await promptDialog({ title: 'Modifier le pseudo', value: current, maxLength: 24, confirmLabel: 'Enregistrer' });
     if (!val || val === current) return;
     api.put('/api/profile', { username: val.trim() })
-      .then(({ user }) => { _user = user; renderIdentity(user); showToast('Nom mis à jour'); })
-      .catch(() => showToast('Ce nom est déjà pris'));
+      .then(({ user }) => {
+        _user = user;
+        renderIdentity(user);
+        // The name is also shown in the nav bar and pre-filled in duels
+        const authUser = getCurrentUser();
+        document.dispatchEvent(new CustomEvent('user-renamed', { detail: { from: current, to: user.username } }));
+        if (authUser) authUser.username = user.username;
+        document.getElementById('nav-username').textContent = user.username;
+        showToast('Nom mis à jour');
+      })
+      .catch(err => showToast(err.message));
   });
 
   document.getElementById('btn-edit-bio').addEventListener('click', async () => {
@@ -46,17 +56,17 @@ export function initProfile(user) {
     if (val === null) return;
     api.put('/api/profile', { bio: val.trim() })
       .then(({ user }) => { _user = user; renderIdentity(user); showToast('Bio mise à jour'); })
-      .catch(() => showToast('Erreur'));
+      .catch(err => showToast(err.message));
   });
 }
 
 // ── Load ──────────────────────────────────────────────────────────
 
 export async function loadProfile() {
-  const [data, actData] = await Promise.all([
-    api.get('/api/profile'),
-    api.get('/api/profile/activity'),
-  ]);
+  let data, actData;
+  try {
+    [data, actData] = await Promise.all([api.get('/api/profile'), api.get('/api/profile/activity')]);
+  } catch (err) { showToast(err.message); return; }
   _user = data.user;
   renderAvatar(data.user);
   renderIdentity(data.user);

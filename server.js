@@ -63,7 +63,7 @@ db.exec(`
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id   INTEGER NOT NULL,
     song_id   TEXT,
-    played_at TEXT NOT NULL DEFAULT (date('now')),
+    played_at TEXT NOT NULL DEFAULT (date('now','localtime')),
     FOREIGN KEY(user_id) REFERENCES users(id)
   );
   CREATE TABLE IF NOT EXISTS activity_log (
@@ -160,7 +160,7 @@ if (!_progressCols.includes('user_id')) {
         last_score      INTEGER DEFAULT 0,
         last_played     TEXT,
         timestamps_json TEXT,
-        mastery         TEXT    DEFAULT 'non_maitrisee',
+        mastery         TEXT,
         in_playlist     INTEGER DEFAULT 0,
         PRIMARY KEY (user_id, song_id),
         FOREIGN KEY(song_id) REFERENCES songs(id)
@@ -195,6 +195,10 @@ if (!_progressCols.includes('user_id')) {
     `);
   }
 }
+// "No status" is stored as NULL. Older rows (and the old column default,
+// still in place on existing databases) wrote 'non_maitrisee' instead, which
+// made merely-played songs count as tagged.
+db.exec(`UPDATE progress SET mastery = NULL WHERE mastery = 'non_maitrisee'`);
 
 // ─── XP & LEVELS ──────────────────────────────────────────────────────────────
 // XP is earned by actions and written to the xp_events ledger at the moment
@@ -345,7 +349,10 @@ const registerLimiter = rateLimit({
 // Behind a TLS-terminating reverse proxy, set TRUST_PROXY=1 so secure cookies work
 if (process.env.TRUST_PROXY) app.set('trust proxy', 1);
 
-app.use(express.json({ limit: '5mb' }));
+// A 4 MB image is ~5.4 MB once base64-encoded: only the avatar route gets that much
+const jsonSmall  = express.json({ limit: '1mb' });
+const jsonAvatar = express.json({ limit: '6mb' });
+app.use((req, res, next) => (req.path === '/api/profile/avatar' ? jsonAvatar : jsonSmall)(req, res, next));
 app.use(session({
   store: new SqliteSessionStore(db),
   secret: process.env.SESSION_SECRET,
@@ -476,24 +483,38 @@ const UA_ARTIST = 'unaccent(s.artist)';
 const UA_TITLE  = 'unaccent(s.title)';
 const DEFAULT_ORDER = `${UA_ARTIST}, ${UA_TITLE}`;
 
-function refreshAired12m() {
+// Songs that are the same recording on several wiki pages are grouped in the
+// library by title + the start of their lyrics. The key only depends on the
+// catalogue, so it is computed once (and refreshed with aired_12m) instead of
+// hashing every song's lyrics on each library request.
+const songGroupKey = new Map();
+
+function lyricsKey(lyrics) {
+  // First 300 letters: minor typos between wiki pages don't split a group
+  const letters = (lyrics || '').toLowerCase().replace(/[^a-z]/g, '').slice(0, 300);
+  return letters ? crypto.createHash('md5').update(letters).digest('hex') : '__empty__';
+}
+
+function refreshCatalogueCache() {
   const cutoff = db.prepare(`SELECT date('now','localtime','-365 days') AS d`).get().d;
-  const rows = db.prepare(`SELECT id, show_dates_json FROM songs`).all();
+  const rows = db.prepare(`SELECT id, title, lyrics, show_dates_json FROM songs`).all();
   const upd  = db.prepare(`UPDATE songs SET aired_12m = ? WHERE id = ?`);
+  songGroupKey.clear();
   db.transaction(() => {
     for (const r of rows) {
       let n = 0;
       try { n = (JSON.parse(r.show_dates_json) || []).filter(d => d >= cutoff).length; } catch (_) {}
       upd.run(n, r.id);
+      songGroupKey.set(r.id, (r.title || '').toLowerCase().trim() + '||' + lyricsKey(r.lyrics));
     }
   })();
 }
-refreshAired12m();
-setInterval(refreshAired12m, 12 * 3600 * 1000).unref();
+refreshCatalogueCache();
+setInterval(refreshCatalogueCache, 12 * 3600 * 1000).unref();
 
 const SORT_MAP = {
   aired_desc:      `s.aired_12m DESC, ${DEFAULT_ORDER}`,
-  z_a:             `${UA_ARTIST} DESC, ${UA_TITLE} DESC`,
+  z_a:             '',   // alphabetical orders are applied after grouping, in JS
   word_count_asc:  `s.word_count ASC NULLS LAST, ${DEFAULT_ORDER}`,
   word_count_desc: `s.word_count DESC NULLS LAST, ${DEFAULT_ORDER}`,
   mc_count_desc:   `s.mc_count DESC NULLS LAST, ${DEFAULT_ORDER}`,
@@ -504,22 +525,20 @@ const SORT_MAP = {
 };
 
 app.get('/api/songs', (req, res) => {
-  const { search, artist, type, mastery, sort, playlist, limit = 50, offset = 0 } = req.query;
-  const playlistId = playlist ? (parseInt(playlist) || null) : null;
+  const { search, type, mastery, sort, playlist } = req.query;
+  const playlistId = parseInt(playlist) || null;
+  const lim = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
+  const off = Math.max(parseInt(req.query.offset) || 0, 0);
   const uid = req.session.userId;
 
   let where = `1=1`;
-  const params = [uid];
+  const params = [uid, uid];
 
   if (search) {
     // Case- and accent-insensitive: "a toi" finds "À toi"
-    const term = `%${unaccentJs(search.trim())}%`;
+    const term = `%${unaccentJs(String(search).trim())}%`;
     where += ` AND (${UA_TITLE} LIKE ? OR ${UA_ARTIST} LIKE ?)`;
     params.push(term, term);
-  }
-  if (artist) {
-    where += ` AND s.artist = ?`;
-    params.push(artist);
   }
   if (type === 'mc') {
     where += ` AND s.mc_count > 0`;
@@ -531,8 +550,8 @@ app.get('/api/songs', (req, res) => {
     where += ` AND (s.chosen_count + s.not_chosen_count) > 0`;
   }
   if (mastery === 'non_maitrisee') {
-    where += ` AND (p.mastery = 'non_maitrisee' OR p.mastery IS NULL)`;
-  } else if (mastery) {
+    where += ` AND p.mastery IS NULL`;
+  } else if (VALID_MASTERY.includes(mastery)) {
     where += ` AND p.mastery = ?`;
     params.push(mastery);
   }
@@ -541,52 +560,35 @@ app.get('/api/songs', (req, res) => {
     params.push(playlistId);
   }
   // "Mal aimées" ranks by pick rate unless another sort was chosen explicitly
-  const sortBy  = sort || (type === 'mal_aimees' ? 'mal_aimees' : '');
-  const orderBy = SORT_MAP[sortBy] || 's.artist, s.title';
-  const inSelectedExpr = playlistId
-    ? `(SELECT COUNT(*) FROM playlist_songs WHERE playlist_id = ${playlistId} AND song_id = s.id) as in_selected_playlist`
-    : `0 as in_selected_playlist`;
+  const sortBy  = Object.hasOwn(SORT_MAP, sort) ? sort : (type === 'mal_aimees' ? 'mal_aimees' : '');
 
-  // Fetch all matching songs (no SQL LIMIT) so we can group duplicates
-  // before paginating — SQLite is fast enough for ~3000 rows.
+  // All matching songs (no SQL LIMIT) so duplicates are grouped before paging
   const allSongs = db.prepare(`
     SELECT s.id, s.title, s.artist, s.year, s.youtube_url, s.word_count, s.show_count,
            s.mc_count, s.fn_count, s.chosen_count, s.not_chosen_count, s.aired_12m,
-           s.lyrics,
-           p.attempts, p.best_score, p.last_score, p.last_played,
            p.mastery,
-           COALESCE(p.in_playlist, 0) as in_playlist,
-           ${inSelectedExpr},
            EXISTS(SELECT 1 FROM playlist_songs ps JOIN playlists pl ON pl.id = ps.playlist_id
                   WHERE pl.user_id = ? AND pl.is_default = 1 AND ps.song_id = s.id) as in_default
     FROM songs s
     LEFT JOIN progress p ON s.id = p.song_id AND p.user_id = ?
     WHERE ${where}
-    ORDER BY ${orderBy}
-  `).all(uid, ...params);
-
-  // Normalize lyrics to a fingerprint for grouping:
-  // use the first 300 chars of normalized lyrics so minor typos between wiki
-  // pages don't prevent grouping, while still distinguishing different songs.
-  function lyricsKey(lyrics) {
-    const norm = (lyrics || '').toLowerCase().replace(/\s+/g, '').replace(/[^a-z]/g, '').slice(0, 300);
-    if (!norm) return '__empty__';
-    return crypto.createHash('md5').update(norm).digest('hex');
-  }
+    ${SORT_MAP[sortBy] ? `ORDER BY ${SORT_MAP[sortBy]}` : ''}
+  `).all(...params);
 
   // Group by normalised title + lyrics fingerprint — keeps different songs with
   // the same title (e.g. "Les mots" by Keen'V vs Mylène Farmer) separate.
   const groups = new Map(); // key → [songs]
   for (const s of allSongs) {
-    const key = s.title.toLowerCase().trim() + '||' + lyricsKey(s.lyrics);
+    const key = songGroupKey.get(s.id) ?? s.id;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(s);
   }
 
   const grouped = [];
   for (const versions of groups.values()) {
+    // Most-aired version first; the sort is stable, so ties keep the query order
     versions.sort((a, b) => (b.show_count || 0) - (a.show_count || 0));
-    const { lyrics: _l, ...primary } = versions[0];
+    const primary = versions[0];
     if (versions.length > 1) {
       primary.alt_versions = versions.slice(1).map(v => ({
         id: v.id, artist: v.artist, year: v.year, show_count: v.show_count,
@@ -595,37 +597,20 @@ app.get('/api/songs', (req, res) => {
     grouped.push(primary);
   }
 
-  // Re-sort grouped results (grouping disrupts order for multi-version songs)
-  const sortKey = sortBy && SORT_MAP[sortBy];
-  if (!sortKey || sortKey.startsWith('unaccent')) {
+  // Alphabetical orders are done here with French collation (é next to e)
+  if (!sortBy || sortBy === 'z_a') {
     const dir = sortBy === 'z_a' ? -1 : 1;
-    grouped.sort((a, b) => dir * (
-      (a.artist || '').localeCompare(b.artist || '', 'fr') || (a.title || '').localeCompare(b.title || '', 'fr')
-    ));
+    const coll = new Intl.Collator('fr', { sensitivity: 'base' });
+    grouped.sort((a, b) => dir * (coll.compare(a.artist || '', b.artist || '') || coll.compare(a.title || '', b.title || '')));
   }
 
-  const total = grouped.length;
-  const lim   = parseInt(limit);
-  const off   = parseInt(offset);
-  const songs = grouped.slice(off, off + lim);
-
-  res.json({ songs, total });
-});
-
-// GET home data (stats + recents + playlist)
-
-// GET distinct artists
-app.get('/api/artists', (req, res) => {
-  const artists = db.prepare(
-    `SELECT DISTINCT artist FROM songs WHERE youtube_url IS NOT NULL AND youtube_url != '' ORDER BY artist`
-  ).all();
-  res.json(artists.map(a => a.artist));
+  res.json({ songs: grouped.slice(off, off + lim), total: grouped.length });
 });
 
 // GET single song with full data
 app.get('/api/songs/:id', (req, res) => {
   const song = db.prepare(`SELECT * FROM songs WHERE id = ?`).get(req.params.id);
-  if (!song) return res.status(404).json({ error: 'Not found' });
+  if (!song) return res.status(404).json({ error: 'Chanson introuvable' });
   const prog = db.prepare(`SELECT * FROM progress WHERE song_id = ? AND user_id = ?`).get(req.params.id, req.session.userId);
   res.json({ ...song, progress: prog || null, mastery: prog?.mastery || null, timestamps_json: prog?.timestamps_json || null });
 });
@@ -646,8 +631,8 @@ app.post('/api/songs/:id/attempt', (req, res) => {
 
   const challengeDone = db.transaction(() => {
     db.prepare(`
-      INSERT INTO progress (user_id, song_id, attempts, best_score, last_score, last_played)
-      VALUES (?, ?, 1, ?, ?, datetime('now'))
+      INSERT INTO progress (user_id, song_id, attempts, best_score, last_score, last_played, mastery)
+      VALUES (?, ?, 1, ?, ?, datetime('now'), NULL)
       ON CONFLICT(user_id, song_id) DO UPDATE SET
         attempts    = attempts + 1,
         best_score  = MAX(COALESCE(best_score, 0), excluded.best_score),
@@ -680,21 +665,16 @@ app.put('/api/songs/:id/timestamps', (req, res) => {
     return res.status(400).json({ error: 'Timestamps invalides' });
   }
   if (!stmtSongExists.get(songId)) return res.status(404).json({ error: 'Chanson introuvable' });
-  const existing = db.prepare(`SELECT song_id FROM progress WHERE song_id = ? AND user_id = ?`).get(songId, uid);
-  if (existing) {
-    db.prepare(`UPDATE progress SET timestamps_json = ? WHERE song_id = ? AND user_id = ?`)
-      .run(JSON.stringify(timestamps), songId, uid);
-  } else {
-    db.prepare(`INSERT INTO progress (user_id, song_id, timestamps_json) VALUES (?, ?, ?)`)
-      .run(uid, songId, JSON.stringify(timestamps));
-  }
+  db.prepare(`
+    INSERT INTO progress (user_id, song_id, timestamps_json, mastery) VALUES (?, ?, ?, NULL)
+    ON CONFLICT(user_id, song_id) DO UPDATE SET timestamps_json = excluded.timestamps_json
+  `).run(uid, songId, JSON.stringify(timestamps));
   res.json({ ok: true });
 });
 
 // GET playlists containing a specific song
 app.get('/api/songs/:id/playlists', (req, res) => {
   const uid = req.session.userId;
-  if (!uid) return res.status(401).json({ error: 'Non connecté' });
   const rows = db.prepare(`
     SELECT ps.playlist_id FROM playlist_songs ps
     JOIN playlists pl ON pl.id = ps.playlist_id
@@ -724,7 +704,7 @@ function setMastery(uid, songId, mastery) {
 }
 
 app.put('/api/songs/:id/mastery', (req, res) => {
-  const { mastery } = req.body;
+  const { mastery } = req.body || {};
   const uid = req.session.userId;
   if (!VALID_MASTERY.includes(mastery)) return res.status(400).json({ error: 'Invalid mastery value' });
   if (!stmtSongExists.get(req.params.id)) return res.status(404).json({ error: 'Chanson introuvable' });
@@ -787,68 +767,6 @@ app.post('/api/songs/match', (req, res) => {
   res.json(clean.map(matchLine));
 });
 
-// PUT toggle playlist
-app.put('/api/songs/:id/playlist', (req, res) => {
-  const { in_playlist } = req.body || {};
-  const songId = req.params.id;
-  const uid    = req.session.userId;
-  const val    = in_playlist ? 1 : 0;
-  if (!stmtSongExists.get(songId)) return res.status(404).json({ error: 'Chanson introuvable' });
-  const existing = db.prepare(`SELECT song_id FROM progress WHERE song_id = ? AND user_id = ?`).get(songId, uid);
-  if (existing) {
-    db.prepare(`UPDATE progress SET in_playlist = ? WHERE song_id = ? AND user_id = ?`).run(val, songId, uid);
-  } else {
-    db.prepare(`INSERT INTO progress (user_id, song_id, in_playlist) VALUES (?, ?, ?)`).run(uid, songId, val);
-  }
-  res.json({ ok: true });
-});
-
-// GET dashboard stats (scoped to the logged-in user)
-app.get('/api/stats', (req, res) => {
-  const uid = req.session.userId;
-
-  const total    = db.prepare(`SELECT COUNT(*) as c FROM songs`).get().c;
-  const played   = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND attempts > 0`).get(uid).c;
-  const attempts = db.prepare(`SELECT SUM(attempts) as c FROM progress WHERE user_id = ?`).get(uid).c || 0;
-  const avgScore = db.prepare(`SELECT AVG(best_score) as v FROM progress WHERE user_id = ? AND attempts > 0`).get(uid).v;
-
-  // Count each named mastery status directly; everything else is implicitly non-mastered
-  const maitrisee     = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'maitrisee'`).get(uid).c;
-  const revision      = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'revision'`).get(uid).c;
-  const prevue        = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'prevue'`).get(uid).c;
-  const non_maitrisee = total - maitrisee - revision - prevue;
-  const masteryCounts = { maitrisee, revision, prevue, non_maitrisee };
-
-  const songs = db.prepare(`
-    SELECT s.id, s.title, s.artist, s.year, s.mc_count, s.fn_count,
-           p.attempts, p.best_score,
-           p.mastery,
-           COALESCE(p.in_playlist, 0) as in_playlist
-    FROM songs s
-    LEFT JOIN progress p ON s.id = p.song_id AND p.user_id = ?
-    ORDER BY s.artist, s.title
-  `).all(uid);
-
-  const playlist = songs.filter(s => s.in_playlist);
-
-  const top = db.prepare(`
-    SELECT s.title, s.artist, p.best_score, p.attempts
-    FROM progress p JOIN songs s ON s.id = p.song_id
-    WHERE p.user_id = ? AND p.attempts > 0
-    ORDER BY p.best_score DESC LIMIT 20
-  `).all(uid);
-
-  const by_artist = db.prepare(`
-    SELECT s.artist, COUNT(*) as total,
-           SUM(CASE WHEN p.attempts > 0 THEN 1 ELSE 0 END) as played,
-           AVG(CASE WHEN p.attempts > 0 THEN p.best_score END) as avg_score
-    FROM songs s LEFT JOIN progress p ON s.id = p.song_id AND p.user_id = ?
-    GROUP BY s.artist ORDER BY total DESC LIMIT 30
-  `).all(uid);
-
-  res.json({ total, played, attempts, avg_score: avgScore, ...masteryCounts, songs, playlist, top, by_artist });
-});
-
 // ─── PROFILE ──────────────────────────────────────────────────────────────────
 
 // Everything shown on a profile. Only whitelisted, non-sensitive fields, so the
@@ -858,10 +776,12 @@ function profileData(uid) {
     SELECT id, username, bio, avatar_url, created_at, xp, bells, final_winnings, favorite_songs_json
     FROM users WHERE id = ?`).get(uid);
   if (!user) return null;
-  const played     = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND attempts > 0`).get(uid).c;
-  const maitrisee  = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'maitrisee'`).get(uid).c;
-  const revision   = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'revision'`).get(uid).c;
-  const prevue     = db.prepare(`SELECT COUNT(*) as c FROM progress WHERE user_id = ? AND mastery = 'prevue'`).get(uid).c;
+  const { played, maitrisee, revision, prevue } = db.prepare(`
+    SELECT COUNT(CASE WHEN attempts > 0 THEN 1 END)          AS played,
+           COUNT(CASE WHEN mastery = 'maitrisee' THEN 1 END) AS maitrisee,
+           COUNT(CASE WHEN mastery = 'revision'  THEN 1 END) AS revision,
+           COUNT(CASE WHEN mastery = 'prevue'    THEN 1 END) AS prevue
+    FROM progress WHERE user_id = ?`).get(uid);
   const emissions  = db.prepare(`SELECT COUNT(*) as c FROM emissions WHERE user_id = ?`).get(uid).c;
   const total_songs = db.prepare(`SELECT COUNT(*) as c FROM songs`).get().c;
   const non_maitrisee = Math.max(0, total_songs - maitrisee - revision - prevue);
@@ -891,11 +811,11 @@ function profileData(uid) {
     }
   }
 
-  // Top artists by number of songs with any mastery tag
+  // Top artists by number of songs with a status (apprise / en cours / à revoir)
   const topArtists = db.prepare(`
     SELECT s.artist, COUNT(*) as tagged
     FROM progress p JOIN songs s ON s.id = p.song_id
-    WHERE p.user_id = ? AND p.mastery IS NOT NULL
+    WHERE p.user_id = ? AND p.mastery IN ('maitrisee','revision','prevue')
     GROUP BY s.artist ORDER BY tagged DESC LIMIT 5
   `).all(uid);
 
@@ -931,9 +851,11 @@ app.put('/api/profile/favorites', (req, res) => {
   res.json({ ok: true });
 });
 
+// A "Même chanson" round needs the cut point scraped for the song
+const MC_PLAYABLE = `s.mc_count > 0 AND s.mc_json IS NOT NULL AND s.mc_json != ''`;
+
 app.get('/api/revision-queue', (req, res) => {
   const uid = req.session.userId;
-  if (!uid) return res.status(401).json({ error: 'Non connecté' });
   const { mastery, count = 5, mc, source, id } = req.query;
   const n = Math.min(Math.max(1, parseInt(count) || 5), 50);
   let songs;
@@ -955,9 +877,9 @@ app.get('/api/revision-queue', (req, res) => {
   } else if (mc === '1' || source === 'mc') {
     songs = db.prepare(`
       SELECT s.id, s.title, s.artist, s.year
-      FROM songs s WHERE s.mc_count > 0
+      FROM songs s WHERE ${MC_PLAYABLE}
       ORDER BY RANDOM() LIMIT ?`).all(n);
-  } else if (mastery) {
+  } else if (VALID_MASTERY.includes(mastery) && mastery !== 'non_maitrisee') {
     songs = db.prepare(`
       SELECT s.id, s.title, s.artist, s.year
       FROM songs s JOIN progress p ON p.song_id = s.id AND p.user_id = ?
@@ -1069,9 +991,7 @@ function activityStats(uid) {
 }
 
 app.get('/api/profile/activity', (req, res) => {
-  const uid = req.session.userId;
-  if (!uid) return res.status(401).json({ error: 'Non connecté' });
-  const a = activityStats(uid);
+  const a = activityStats(req.session.userId);
   res.json({ today: a.today, days: a.days.slice(0, 60), streak: a.streak, maxStreak: a.maxStreak,
              totalActiveDays: a.totalActiveDays, streakAtRisk: a.streakAtRisk });
 });
@@ -1243,7 +1163,7 @@ app.get('/api/home', (req, res) => {
     FROM playlists p LEFT JOIN playlist_songs ps ON ps.playlist_id = p.id
     WHERE p.user_id = ? GROUP BY p.id ORDER BY p.is_default DESC, p.created_at
   `).all(uid);
-  const mcCount = db.prepare(`SELECT COUNT(*) AS n FROM songs WHERE mc_count > 0`).get().n;
+  const mcCount = db.prepare(`SELECT COUNT(*) AS n FROM songs s WHERE ${MC_PLAYABLE}`).get().n;
 
   const recentSongs = db.prepare(`
     SELECT 'song' AS type, s.id, s.title, s.artist, p.last_played AS at
@@ -1306,17 +1226,12 @@ app.post('/api/emission/complete', (req, res) => {
 });
 
 app.get('/api/emission/episodes', (req, res) => {
-  if (!req.session.userId) return res.status(401).json({ error: 'Non connecté' });
-  try {
-    const rows = db.prepare(`
-      SELECT id, air_date, emission_no
-      FROM real_episodes
-      WHERE air_date IS NOT NULL
-      ORDER BY air_date DESC, emission_no ASC
-      LIMIT 600
-    `).all();
-    res.json(rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  res.json(db.prepare(`
+    SELECT id, air_date, emission_no
+    FROM real_episodes
+    WHERE air_date IS NOT NULL
+    ORDER BY air_date DESC, emission_no ASC
+  `).all());
 });
 
 // ─── PLAYLISTS ────────────────────────────────────────────────────────────────
@@ -1350,12 +1265,10 @@ app.get('/api/playlists', (req, res) => {
 
 app.post('/api/playlists', (req, res) => {
   const uid = req.session.userId;
-  const { name } = req.body || {};
-  if (!name?.trim()) return res.status(400).json({ error: 'Nom requis' });
-  const { lastInsertRowid: id } = db.prepare(
-    `INSERT INTO playlists (user_id, name) VALUES (?, ?)`
-  ).run(uid, name.trim().slice(0, 64));
-  res.json({ id, name: name.trim(), is_default: 0, song_count: 0 });
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 64) : '';
+  if (!name) return res.status(400).json({ error: 'Nom requis' });
+  const { lastInsertRowid: id } = db.prepare(`INSERT INTO playlists (user_id, name) VALUES (?, ?)`).run(uid, name);
+  res.json({ id, name, is_default: 0, song_count: 0 });
 });
 
 app.delete('/api/playlists/:id', (req, res) => {
@@ -1424,10 +1337,11 @@ async function callGemini(prompt, apiKey) {
   for (const model of GEMINI_MODELS) {
     try {
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+          signal: AbortSignal.timeout(20000),   // never leave the player waiting on a stuck request
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: {
@@ -1449,7 +1363,15 @@ async function callGemini(prompt, apiKey) {
   return null;
 }
 
-function shuffle(arr) { return [...arr].sort(() => Math.random() - 0.5); }
+// Fisher–Yates: every order equally likely
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 
 function norm(str) {
   return (str || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -1488,8 +1410,8 @@ const INFINITIVES = new Set([
   'esperer','penser','suivre','apprendre','garder','donner','toucher','regarder',
   'chercher','arriver','rentrer','sortir','monter','descendre','avancer','bouger',
   'commencer','raconter','expliquer','repondre','appeler','manger','boire','sourire',
-  'crier','passer','changer','vieillir','souffrir','guerir','fuir','courir','plaire',
-  'trahir','mentir','subir','unir','agir','reagir','saisir','detenir','obtenir',
+  'crier','passer','changer','vieillir','souffrir','guerir','fuir','plaire',
+  'trahir','subir','unir','agir','reagir','saisir','detenir','obtenir',
   'retenir','appartenir','prevenir','intervenir','soutenir','maintenir','parvenir',
 ]);
 
@@ -2061,7 +1983,6 @@ function pickMcSong(episodeId) {
 
 // ── Generated category builder (fallback / "Catégories inventées" mode) ──
 async function buildGeneratedPairs() {
-  {
     const songs = db.prepare(`SELECT id, title, artist, year, blanks_json FROM songs`).all();
 
     const parsed = songs.map(s => {
@@ -2183,7 +2104,6 @@ async function buildGeneratedPairs() {
       if (p && !p.categoryName) p.categoryName = p.label;
     }
     return pairsByLevel;
-  }
 }
 
 // ── Endpoint ──────────────────────────────────────────────────────
@@ -2191,19 +2111,23 @@ async function buildGeneratedPairs() {
 //         (replay a real episode) | 'generated' (invented categories)
 app.post('/api/emission/generate', async (req, res) => {
   try {
-    const source = (req.body && req.body.source) || 'real';
+    const source = ['real', 'episode', 'generated'].includes(req.body?.source) ? req.body.source : 'real';
 
     let pairsByLevel, episodeId = null;
     if (source === 'generated') {
       pairsByLevel = await buildGeneratedPairs();
     } else if (source === 'episode') {
-      const specificId = req.body.episodeId ? parseInt(req.body.episodeId) : null;
+      const specificId = parseInt(req.body?.episodeId) || null;
       ({ pairsByLevel, episodeId } = buildEpisodePairs(specificId));
     } else {
       pairsByLevel = buildRealPairs();
     }
 
-    const pairs = EMISSION_LEVELS.map(l => pairsByLevel[l] ?? null);
+    // Replayed episodes can have categories above 50 pts: keep them all
+    const levels = source === 'episode'
+      ? Object.keys(pairsByLevel).map(Number).sort((a, b) => b - a)
+      : EMISSION_LEVELS;
+    const pairs = levels.map(l => pairsByLevel[l] ?? null);
     for (const p of pairs) if (p && !p.categoryName) p.categoryName = p.label;
 
     rememberEmission(pairs);
@@ -2219,8 +2143,20 @@ app.post('/api/emission/generate', async (req, res) => {
     });
   } catch (err) {
     console.error('Emission generate error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Impossible de générer l'émission" });
   }
+});
+
+// Unknown API routes and failures answer in JSON, which the client can read
+// (Express would otherwise send an HTML page).
+app.use('/api', (req, res) => res.status(404).json({ error: 'Route inconnue' }));
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = err.status || err.statusCode || 500;
+  if (status >= 500) console.error(err);
+  res.status(status).json({
+    error: status === 413 ? 'Fichier trop volumineux' : status < 500 ? 'Requête invalide' : 'Erreur serveur',
+  });
 });
 
 app.listen(PORT, () => {
